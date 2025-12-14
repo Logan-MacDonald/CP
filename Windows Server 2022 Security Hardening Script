@@ -247,100 +247,195 @@ function Set-AccountPolicies {
     $SecPolPath = Join-Path $Script:BackupDir "secpol_backup.inf"
     secedit /export /cfg $SecPolPath /quiet
     
+    # Check if export was successful
+    if (!(Test-Path $SecPolPath)) {
+        Write-Warning2 "Could not export security policy. Using net accounts instead."
+        
+        # Fallback to net accounts
+        $NetAccounts = net accounts
+        
+        # Parse net accounts output
+        Write-Info "Current account policy from 'net accounts':"
+        $NetAccounts | ForEach-Object { Write-Info "  $_" }
+        
+        return
+    }
+    
     # Get current settings
-    $SecPol = Get-Content $SecPolPath
+    $SecPol = Get-Content $SecPolPath -ErrorAction SilentlyContinue
+    
+    if (!$SecPol) {
+        Write-Warning2 "Security policy file is empty or unreadable"
+        return
+    }
+    
+    # Helper function to safely get policy value
+    function Get-PolicyValue {
+        param([string]$PolicyName, [string[]]$Content)
+        
+        $Line = $Content | Select-String $PolicyName
+        if ($Line) {
+            $Value = ($Line.ToString().Split("=")[1]).Trim()
+            return $Value
+        }
+        return $null
+    }
     
     # Password History (CIS 1.1.1 - 24 passwords remembered)
-    $PasswordHistory = ($SecPol | Select-String "PasswordHistorySize").ToString().Split("=")[1].Trim()
-    if ([int]$PasswordHistory -lt 24) {
-        Write-Issue "Password history is $PasswordHistory (should be 24+)" -Category "Account Policy" -Severity "Medium"
+    $PasswordHistory = Get-PolicyValue -PolicyName "PasswordHistorySize" -Content $SecPol
+    if ($null -ne $PasswordHistory) {
+        if ([int]$PasswordHistory -lt 24) {
+            Write-Issue "Password history is $PasswordHistory (should be 24+)" -Category "Account Policy" -Severity "Medium"
+            if (Confirm-Action "Set password history to 24?") {
+                net accounts /uniquepw:24 | Out-Null
+                Write-Fixed "Set password history to 24"
+            }
+        }
+        else {
+            Write-Ok "Password history: $PasswordHistory (compliant)"
+        }
+    }
+    else {
+        Write-Warning2 "Could not determine password history setting"
+        # Try to set it anyway
         if (Confirm-Action "Set password history to 24?") {
             net accounts /uniquepw:24 | Out-Null
             Write-Fixed "Set password history to 24"
         }
     }
-    else {
-        Write-Ok "Password history: $PasswordHistory (compliant)"
-    }
     
     # Maximum Password Age (CIS 1.1.2 - 365 days or less, typically 60-90)
-    $MaxPwdAge = ($SecPol | Select-String "MaximumPasswordAge").ToString().Split("=")[1].Trim()
-    if ([int]$MaxPwdAge -gt 365 -or [int]$MaxPwdAge -eq -1) {
-        Write-Issue "Maximum password age is $MaxPwdAge days (should be 365 or less)" -Category "Account Policy" -Severity "Medium"
+    $MaxPwdAge = Get-PolicyValue -PolicyName "MaximumPasswordAge" -Content $SecPol
+    if ($null -ne $MaxPwdAge) {
+        if ([int]$MaxPwdAge -gt 365 -or [int]$MaxPwdAge -eq -1) {
+            Write-Issue "Maximum password age is $MaxPwdAge days (should be 365 or less)" -Category "Account Policy" -Severity "Medium"
+            if (Confirm-Action "Set maximum password age to 90 days?") {
+                net accounts /maxpwage:90 | Out-Null
+                Write-Fixed "Set maximum password age to 90 days"
+            }
+        }
+        else {
+            Write-Ok "Maximum password age: $MaxPwdAge days (compliant)"
+        }
+    }
+    else {
+        Write-Warning2 "Could not determine maximum password age"
         if (Confirm-Action "Set maximum password age to 90 days?") {
             net accounts /maxpwage:90 | Out-Null
             Write-Fixed "Set maximum password age to 90 days"
         }
     }
-    else {
-        Write-Ok "Maximum password age: $MaxPwdAge days (compliant)"
-    }
     
     # Minimum Password Age (CIS 1.1.3 - 1 day or more)
-    $MinPwdAge = ($SecPol | Select-String "MinimumPasswordAge").ToString().Split("=")[1].Trim()
-    if ([int]$MinPwdAge -lt 1) {
-        Write-Issue "Minimum password age is $MinPwdAge days (should be 1+)" -Category "Account Policy" -Severity "Low"
+    $MinPwdAge = Get-PolicyValue -PolicyName "MinimumPasswordAge" -Content $SecPol
+    if ($null -ne $MinPwdAge) {
+        if ([int]$MinPwdAge -lt 1) {
+            Write-Issue "Minimum password age is $MinPwdAge days (should be 1+)" -Category "Account Policy" -Severity "Low"
+            if (Confirm-Action "Set minimum password age to 1 day?") {
+                net accounts /minpwage:1 | Out-Null
+                Write-Fixed "Set minimum password age to 1 day"
+            }
+        }
+        else {
+            Write-Ok "Minimum password age: $MinPwdAge days (compliant)"
+        }
+    }
+    else {
+        Write-Warning2 "Could not determine minimum password age"
         if (Confirm-Action "Set minimum password age to 1 day?") {
             net accounts /minpwage:1 | Out-Null
             Write-Fixed "Set minimum password age to 1 day"
         }
     }
-    else {
-        Write-Ok "Minimum password age: $MinPwdAge days (compliant)"
-    }
     
     # Minimum Password Length (CIS 1.1.4 - 14 characters)
-    $MinPwdLen = ($SecPol | Select-String "MinimumPasswordLength").ToString().Split("=")[1].Trim()
-    if ([int]$MinPwdLen -lt 14) {
-        Write-Issue "Minimum password length is $MinPwdLen (should be 14+)" -Category "Account Policy" -Severity "High"
+    $MinPwdLen = Get-PolicyValue -PolicyName "MinimumPasswordLength" -Content $SecPol
+    if ($null -ne $MinPwdLen) {
+        if ([int]$MinPwdLen -lt 14) {
+            Write-Issue "Minimum password length is $MinPwdLen (should be 14+)" -Category "Account Policy" -Severity "High"
+            if (Confirm-Action "Set minimum password length to 14?") {
+                net accounts /minpwlen:14 | Out-Null
+                Write-Fixed "Set minimum password length to 14"
+            }
+        }
+        else {
+            Write-Ok "Minimum password length: $MinPwdLen (compliant)"
+        }
+    }
+    else {
+        Write-Warning2 "Could not determine minimum password length"
         if (Confirm-Action "Set minimum password length to 14?") {
             net accounts /minpwlen:14 | Out-Null
             Write-Fixed "Set minimum password length to 14"
         }
     }
-    else {
-        Write-Ok "Minimum password length: $MinPwdLen (compliant)"
-    }
     
     Write-SubSection "Account Lockout Policy"
     
     # Account Lockout Duration (CIS 1.2.1 - 15 minutes or more)
-    $LockoutDuration = ($SecPol | Select-String "LockoutDuration").ToString().Split("=")[1].Trim()
-    if ([int]$LockoutDuration -lt 15 -and [int]$LockoutDuration -ne -1) {
-        Write-Issue "Account lockout duration is $LockoutDuration minutes (should be 15+)" -Category "Account Policy" -Severity "Medium"
+    $LockoutDuration = Get-PolicyValue -PolicyName "LockoutDuration" -Content $SecPol
+    if ($null -ne $LockoutDuration) {
+        if ([int]$LockoutDuration -lt 15 -and [int]$LockoutDuration -ne -1) {
+            Write-Issue "Account lockout duration is $LockoutDuration minutes (should be 15+)" -Category "Account Policy" -Severity "Medium"
+            if (Confirm-Action "Set lockout duration to 30 minutes?") {
+                net accounts /lockoutduration:30 | Out-Null
+                Write-Fixed "Set lockout duration to 30 minutes"
+            }
+        }
+        else {
+            Write-Ok "Account lockout duration: $LockoutDuration minutes (compliant)"
+        }
+    }
+    else {
+        Write-Warning2 "Could not determine lockout duration"
         if (Confirm-Action "Set lockout duration to 30 minutes?") {
             net accounts /lockoutduration:30 | Out-Null
             Write-Fixed "Set lockout duration to 30 minutes"
         }
     }
-    else {
-        Write-Ok "Account lockout duration: $LockoutDuration minutes (compliant)"
-    }
     
     # Account Lockout Threshold (CIS 1.2.2 - 5 or fewer, but not 0)
-    $LockoutThreshold = ($SecPol | Select-String "LockoutBadCount").ToString().Split("=")[1].Trim()
-    if ([int]$LockoutThreshold -gt 5 -or [int]$LockoutThreshold -eq 0) {
-        Write-Issue "Account lockout threshold is $LockoutThreshold (should be 1-5)" -Category "Account Policy" -Severity "High"
+    $LockoutThreshold = Get-PolicyValue -PolicyName "LockoutBadCount" -Content $SecPol
+    if ($null -ne $LockoutThreshold) {
+        if ([int]$LockoutThreshold -gt 5 -or [int]$LockoutThreshold -eq 0) {
+            Write-Issue "Account lockout threshold is $LockoutThreshold (should be 1-5)" -Category "Account Policy" -Severity "High"
+            if (Confirm-Action "Set lockout threshold to 5 attempts?") {
+                net accounts /lockoutthreshold:5 | Out-Null
+                Write-Fixed "Set lockout threshold to 5 attempts"
+            }
+        }
+        else {
+            Write-Ok "Account lockout threshold: $LockoutThreshold (compliant)"
+        }
+    }
+    else {
+        Write-Warning2 "Could not determine lockout threshold"
         if (Confirm-Action "Set lockout threshold to 5 attempts?") {
             net accounts /lockoutthreshold:5 | Out-Null
             Write-Fixed "Set lockout threshold to 5 attempts"
         }
     }
-    else {
-        Write-Ok "Account lockout threshold: $LockoutThreshold (compliant)"
-    }
     
     # Reset Account Lockout Counter (CIS 1.2.3 - 15 minutes or more)
-    $LockoutWindow = ($SecPol | Select-String "ResetLockoutCount").ToString().Split("=")[1].Trim()
-    if ([int]$LockoutWindow -lt 15) {
-        Write-Issue "Lockout counter reset is $LockoutWindow minutes (should be 15+)" -Category "Account Policy" -Severity "Medium"
+    $LockoutWindow = Get-PolicyValue -PolicyName "ResetLockoutCount" -Content $SecPol
+    if ($null -ne $LockoutWindow) {
+        if ([int]$LockoutWindow -lt 15) {
+            Write-Issue "Lockout counter reset is $LockoutWindow minutes (should be 15+)" -Category "Account Policy" -Severity "Medium"
+            if (Confirm-Action "Set lockout window to 30 minutes?") {
+                net accounts /lockoutwindow:30 | Out-Null
+                Write-Fixed "Set lockout window to 30 minutes"
+            }
+        }
+        else {
+            Write-Ok "Lockout counter reset: $LockoutWindow minutes (compliant)"
+        }
+    }
+    else {
+        Write-Warning2 "Could not determine lockout window"
         if (Confirm-Action "Set lockout window to 30 minutes?") {
             net accounts /lockoutwindow:30 | Out-Null
             Write-Fixed "Set lockout window to 30 minutes"
         }
-    }
-    else {
-        Write-Ok "Lockout counter reset: $LockoutWindow minutes (compliant)"
     }
 }
 
@@ -356,12 +451,35 @@ function Set-UserRightsAssignment {
     # Get current user rights
     $SecPolPath = Join-Path $env:TEMP "secpol_rights.inf"
     secedit /export /cfg $SecPolPath /quiet
-    $SecPol = Get-Content $SecPolPath
+    
+    if (!(Test-Path $SecPolPath)) {
+        Write-Warning2 "Could not export security policy for user rights check"
+        return
+    }
+    
+    $SecPol = Get-Content $SecPolPath -ErrorAction SilentlyContinue
+    
+    if (!$SecPol) {
+        Write-Warning2 "Security policy file is empty"
+        Remove-Item $SecPolPath -Force -ErrorAction SilentlyContinue
+        return
+    }
+    
+    # Helper function to safely get policy value
+    function Get-RightsValue {
+        param([string]$PolicyName, [string[]]$Content)
+        
+        $Line = $Content | Select-String $PolicyName
+        if ($Line) {
+            return $Line.ToString()
+        }
+        return $null
+    }
     
     # Debug/Programs (CIS 2.2.14 - Should be Administrators only)
-    $DebugPrograms = ($SecPol | Select-String "SeDebugPrivilege")
+    $DebugPrograms = Get-RightsValue -PolicyName "SeDebugPrivilege" -Content $SecPol
     if ($DebugPrograms) {
-        $DebugUsers = $DebugPrograms.ToString().Split("=")[1].Trim()
+        $DebugUsers = $DebugPrograms.Split("=")[1].Trim()
         if ($DebugUsers -ne "*S-1-5-32-544") {
             Write-Warning2 "Debug programs right assigned to: $DebugUsers (should be Administrators only)"
         }
@@ -369,16 +487,22 @@ function Set-UserRightsAssignment {
             Write-Ok "Debug programs: Administrators only"
         }
     }
+    else {
+        Write-Info "Debug programs privilege not explicitly configured"
+    }
     
     # Remote Desktop (CIS 2.2.26)
-    $RDPUsers = ($SecPol | Select-String "SeRemoteInteractiveLogonRight")
+    $RDPUsers = Get-RightsValue -PolicyName "SeRemoteInteractiveLogonRight" -Content $SecPol
     if ($RDPUsers) {
-        Write-Info "Remote Desktop access granted to: $($RDPUsers.ToString().Split('=')[1].Trim())"
+        Write-Info "Remote Desktop access granted to: $($RDPUsers.Split('=')[1].Trim())"
+    }
+    else {
+        Write-Info "Remote Desktop access not explicitly configured"
     }
     
     # Deny access from network (CIS 2.2.17)
-    $DenyNetwork = ($SecPol | Select-String "SeDenyNetworkLogonRight")
-    if (!$DenyNetwork -or $DenyNetwork.ToString() -notmatch "Guest") {
+    $DenyNetwork = Get-RightsValue -PolicyName "SeDenyNetworkLogonRight" -Content $SecPol
+    if (!$DenyNetwork -or $DenyNetwork -notmatch "Guest") {
         Write-Issue "Guest account should be denied network access" -Category "User Rights" -Severity "Medium"
     }
     else {
@@ -386,21 +510,27 @@ function Set-UserRightsAssignment {
     }
     
     # Shut down the system (CIS 2.2.36)
-    $ShutdownRight = ($SecPol | Select-String "SeShutdownPrivilege")
+    $ShutdownRight = Get-RightsValue -PolicyName "SeShutdownPrivilege" -Content $SecPol
     if ($ShutdownRight) {
-        Write-Info "Shutdown right granted to: $($ShutdownRight.ToString().Split('=')[1].Trim())"
+        Write-Info "Shutdown right granted to: $($ShutdownRight.Split('=')[1].Trim())"
+    }
+    else {
+        Write-Info "Shutdown privilege not explicitly configured"
     }
     
     # Take ownership (CIS 2.2.39)
-    $TakeOwnership = ($SecPol | Select-String "SeTakeOwnershipPrivilege")
+    $TakeOwnership = Get-RightsValue -PolicyName "SeTakeOwnershipPrivilege" -Content $SecPol
     if ($TakeOwnership) {
-        $TOUsers = $TakeOwnership.ToString().Split("=")[1].Trim()
+        $TOUsers = $TakeOwnership.Split("=")[1].Trim()
         if ($TOUsers -ne "*S-1-5-32-544") {
             Write-Warning2 "Take ownership right assigned to: $TOUsers (should be Administrators only)"
         }
         else {
             Write-Ok "Take ownership: Administrators only"
         }
+    }
+    else {
+        Write-Info "Take ownership privilege not explicitly configured"
     }
     
     Remove-Item $SecPolPath -Force -ErrorAction SilentlyContinue
