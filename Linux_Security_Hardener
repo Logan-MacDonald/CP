@@ -1,0 +1,1239 @@
+#!/bin/bash
+
+#===============================================================================
+# Linux Security Hardening Script for Ubuntu/Linux Mint
+# Based on CyberPatriot Checklist
+# 
+# USAGE: sudo ./linux_security_hardener.sh [OPTIONS]
+#
+# OPTIONS:
+#   --check-only    Only perform checks without making changes
+#   --auto-fix      Automatically fix issues without prompting
+#   --help          Display this help message
+#
+# WARNING: This script makes system changes. Always backup your system first!
+#===============================================================================
+
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+BOLD='\033[1m'
+
+# Script mode
+CHECK_ONLY=false
+AUTO_FIX=false
+
+# Log file
+LOG_FILE="/var/log/security_hardening_$(date +%Y%m%d_%H%M%S).log"
+BACKUP_DIR="/root/security_backups_$(date +%Y%m%d_%H%M%S)"
+
+# Counters
+ISSUES_FOUND=0
+ISSUES_FIXED=0
+WARNINGS=0
+
+#===============================================================================
+# UTILITY FUNCTIONS
+#===============================================================================
+
+print_banner() {
+    echo -e "${CYAN}"
+    echo "╔═══════════════════════════════════════════════════════════════════╗"
+    echo "║         Linux Security Hardening Script v1.0                      ║"
+    echo "║         For Ubuntu / Linux Mint                                   ║"
+    echo "║         Based on CyberPatriot Checklist                           ║"
+    echo "╚═══════════════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+}
+
+print_section() {
+    echo ""
+    echo -e "${BLUE}${BOLD}═══════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}${BOLD}  $1${NC}"
+    echo -e "${BLUE}${BOLD}═══════════════════════════════════════════════════════════════════${NC}"
+}
+
+print_subsection() {
+    echo ""
+    echo -e "${CYAN}--- $1 ---${NC}"
+}
+
+log_message() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+}
+
+print_ok() {
+    echo -e "${GREEN}[✓]${NC} $1"
+    log_message "[OK] $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[!]${NC} $1"
+    log_message "[WARNING] $1"
+    ((WARNINGS++))
+}
+
+print_issue() {
+    echo -e "${RED}[✗]${NC} $1"
+    log_message "[ISSUE] $1"
+    ((ISSUES_FOUND++))
+}
+
+print_info() {
+    echo -e "${BLUE}[i]${NC} $1"
+    log_message "[INFO] $1"
+}
+
+print_fixed() {
+    echo -e "${GREEN}[FIXED]${NC} $1"
+    log_message "[FIXED] $1"
+    ((ISSUES_FIXED++))
+}
+
+confirm_action() {
+    if [ "$AUTO_FIX" = true ]; then
+        return 0
+    fi
+    if [ "$CHECK_ONLY" = true ]; then
+        return 1
+    fi
+    
+    echo -e -n "${YELLOW}$1 (y/n): ${NC}"
+    read -r response
+    case "$response" in
+        [yY][eE][sS]|[yY]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+backup_file() {
+    local file="$1"
+    if [ -f "$file" ]; then
+        mkdir -p "$BACKUP_DIR"
+        cp "$file" "$BACKUP_DIR/$(basename "$file").backup"
+        print_info "Backed up $file"
+    fi
+}
+
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        echo -e "${RED}ERROR: This script must be run as root (use sudo)${NC}"
+        exit 1
+    fi
+}
+
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --check-only)
+                CHECK_ONLY=true
+                shift
+                ;;
+            --auto-fix)
+                AUTO_FIX=true
+                shift
+                ;;
+            --help)
+                print_banner
+                echo "Usage: sudo $0 [OPTIONS]"
+                echo ""
+                echo "Options:"
+                echo "  --check-only    Only perform checks without making changes"
+                echo "  --auto-fix      Automatically fix issues without prompting"
+                echo "  --help          Display this help message"
+                echo ""
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $1"
+                echo "Use --help for usage information"
+                exit 1
+                ;;
+        esac
+    done
+}
+
+#===============================================================================
+# 1. SYSTEM LOG CHECKS
+#===============================================================================
+
+check_system_logs() {
+    print_section "1. SYSTEM LOG FILE ANALYSIS"
+    
+    print_subsection "Checking /var/log for suspicious activity"
+    
+    # Check auth.log for failed login attempts
+    if [ -f /var/log/auth.log ]; then
+        failed_logins=$(grep -c "Failed password" /var/log/auth.log 2>/dev/null || echo "0")
+        if [ "$failed_logins" -gt 10 ]; then
+            print_warning "Found $failed_logins failed login attempts in auth.log"
+        else
+            print_ok "Failed login attempts: $failed_logins (acceptable)"
+        fi
+        
+        # Check for successful su/sudo
+        su_attempts=$(grep -c "su\[" /var/log/auth.log 2>/dev/null || echo "0")
+        print_info "su command usage in logs: $su_attempts"
+    else
+        print_warning "/var/log/auth.log not found"
+    fi
+    
+    # Check syslog for errors
+    if [ -f /var/log/syslog ]; then
+        error_count=$(grep -ci "error" /var/log/syslog 2>/dev/null || echo "0")
+        print_info "Error entries in syslog: $error_count"
+    fi
+    
+    print_subsection "Checking user bash history files"
+    
+    # Check bash history for suspicious commands
+    suspicious_commands=("nc " "netcat" "nmap" "john" "hydra" "metasploit" "msfconsole" "wget http" "curl http" "rm -rf /" "chmod 777" "base64 -d")
+    
+    for user_home in /home/*; do
+        if [ -d "$user_home" ]; then
+            username=$(basename "$user_home")
+            for hist_file in "$user_home/.bash_history" "$user_home/.sh_history"; do
+                if [ -f "$hist_file" ]; then
+                    for cmd in "${suspicious_commands[@]}"; do
+                        if grep -q "$cmd" "$hist_file" 2>/dev/null; then
+                            print_warning "Suspicious command '$cmd' found in $hist_file"
+                        fi
+                    done
+                fi
+            done
+        fi
+    done
+    print_ok "Bash history check completed"
+}
+
+#===============================================================================
+# 2. SOFTWARE AUDIT
+#===============================================================================
+
+check_installed_software() {
+    print_section "2. INSTALLED SOFTWARE AUDIT"
+    
+    print_subsection "Checking for potentially dangerous/hacking tools"
+    
+    # List of potentially dangerous tools
+    dangerous_tools=(
+        "netcat" "nc" "ncat"
+        "nmap"
+        "john" "john-data"
+        "hydra" "hydra-gtk"
+        "metasploit-framework"
+        "aircrack-ng"
+        "wireshark" "tshark"
+        "ophcrack"
+        "medusa"
+        "nikto"
+        "sqlmap"
+        "hashcat"
+        "ettercap" "ettercap-text-only" "ettercap-graphical"
+        "kismet"
+        "burpsuite"
+        "maltego"
+        "beef-xss"
+        "social-engineer-toolkit"
+        "zenmap"
+        "armitage"
+        "lynis"  # Note: This is a security auditing tool, may be legitimate
+        "veil-evasion"
+        "backdoor-factory"
+        "crunch"
+    )
+    
+    for tool in "${dangerous_tools[@]}"; do
+        if dpkg -l 2>/dev/null | grep -qw "$tool"; then
+            print_issue "Potentially dangerous tool installed: $tool"
+            if confirm_action "Remove $tool?"; then
+                apt-get remove -y "$tool" 2>/dev/null
+                print_fixed "Removed $tool"
+            fi
+        fi
+    done
+    
+    print_subsection "Checking for games and unnecessary software"
+    
+    games=(
+        "aisleriot" "gnome-mines" "gnome-sudoku" "mahjongg" "gnome-mahjongg"
+        "freecell" "sol" "solitaire" "minecraft" "steam"
+    )
+    
+    for game in "${games[@]}"; do
+        if dpkg -l 2>/dev/null | grep -qw "$game"; then
+            print_warning "Game/unnecessary software installed: $game"
+        fi
+    done
+    
+    print_subsection "Checking for remote access tools"
+    
+    remote_tools=("openssh-server" "telnetd" "rsh-server" "vnc4server" "tightvncserver")
+    
+    for tool in "${remote_tools[@]}"; do
+        if dpkg -l 2>/dev/null | grep -qw "$tool"; then
+            print_warning "Remote access tool installed: $tool (verify if needed)"
+        fi
+    done
+    
+    print_ok "Software audit completed"
+}
+
+#===============================================================================
+# 3. CRON JOB AUDIT
+#===============================================================================
+
+check_cron_jobs() {
+    print_section "3. SCHEDULED TASKS (CRON) AUDIT"
+    
+    print_subsection "Checking system crontabs"
+    
+    # Check /etc/crontab
+    if [ -f /etc/crontab ]; then
+        print_info "Contents of /etc/crontab:"
+        cat /etc/crontab | grep -v "^#" | grep -v "^$" | while read line; do
+            echo "    $line"
+        done
+    fi
+    
+    # Check /etc/cron.d/
+    if [ -d /etc/cron.d ]; then
+        for cronfile in /etc/cron.d/*; do
+            if [ -f "$cronfile" ]; then
+                print_info "Cron file: $cronfile"
+            fi
+        done
+    fi
+    
+    # Check user crontabs
+    print_subsection "Checking user crontabs in /var/spool/cron/crontabs"
+    
+    if [ -d /var/spool/cron/crontabs ]; then
+        for user_cron in /var/spool/cron/crontabs/*; do
+            if [ -f "$user_cron" ]; then
+                username=$(basename "$user_cron")
+                print_warning "User crontab found for: $username"
+                cat "$user_cron" | grep -v "^#" | grep -v "^$" | while read line; do
+                    echo "    $line"
+                done
+            fi
+        done
+    else
+        print_ok "No user crontabs found"
+    fi
+    
+    # Check anacron
+    print_subsection "Checking anacron"
+    
+    if [ -d /var/spool/anacron ]; then
+        ls -la /var/spool/anacron/ 2>/dev/null
+    fi
+    
+    if [ -f /etc/anacrontab ]; then
+        print_info "Anacron configuration found"
+    fi
+    
+    print_ok "Cron audit completed"
+}
+
+#===============================================================================
+# 4. USER POLICY AND PASSWORD CONFIGURATION
+#===============================================================================
+
+check_user_policy() {
+    print_section "4. USER POLICY AND PASSWORD CONFIGURATION"
+    
+    print_subsection "Checking for automatic login"
+    
+    # Check LightDM autologin
+    if [ -f /etc/lightdm/lightdm.conf ]; then
+        if grep -q "^autologin-user=" /etc/lightdm/lightdm.conf 2>/dev/null; then
+            autologin_user=$(grep "^autologin-user=" /etc/lightdm/lightdm.conf | cut -d'=' -f2)
+            print_issue "Automatic login enabled for user: $autologin_user"
+            if confirm_action "Disable automatic login?"; then
+                backup_file /etc/lightdm/lightdm.conf
+                sed -i 's/^autologin-user=/#autologin-user=/' /etc/lightdm/lightdm.conf
+                print_fixed "Disabled automatic login"
+            fi
+        else
+            print_ok "No automatic login in LightDM"
+        fi
+    fi
+    
+    # Check GDM autologin
+    if [ -f /etc/gdm3/custom.conf ]; then
+        if grep -q "^AutomaticLoginEnable=true" /etc/gdm3/custom.conf 2>/dev/null; then
+            print_issue "Automatic login enabled in GDM"
+            if confirm_action "Disable automatic login?"; then
+                backup_file /etc/gdm3/custom.conf
+                sed -i 's/^AutomaticLoginEnable=true/AutomaticLoginEnable=false/' /etc/gdm3/custom.conf
+                print_fixed "Disabled automatic login in GDM"
+            fi
+        else
+            print_ok "No automatic login in GDM"
+        fi
+    fi
+    
+    print_subsection "Checking for users with UID 0 (root privileges)"
+    
+    root_users=$(awk -F: '($3 == "0") {print $1}' /etc/passwd)
+    root_count=$(echo "$root_users" | wc -w)
+    
+    if [ "$root_count" -gt 1 ]; then
+        print_issue "Multiple users with UID 0 found: $root_users"
+    else
+        print_ok "Only root has UID 0"
+    fi
+    
+    print_subsection "Checking /etc/passwd permissions"
+    
+    passwd_perms=$(stat -c "%a" /etc/passwd)
+    if [ "$passwd_perms" != "644" ]; then
+        print_issue "/etc/passwd has incorrect permissions: $passwd_perms (should be 644)"
+        if confirm_action "Fix /etc/passwd permissions?"; then
+            chmod 644 /etc/passwd
+            print_fixed "Set /etc/passwd permissions to 644"
+        fi
+    else
+        print_ok "/etc/passwd permissions are correct (644)"
+    fi
+    
+    print_subsection "Checking for guest account"
+    
+    if grep -q "^guest:" /etc/passwd 2>/dev/null; then
+        print_issue "Guest account exists"
+        if confirm_action "Remove guest account?"; then
+            userdel -r guest 2>/dev/null || true
+            print_fixed "Removed guest account"
+        fi
+    else
+        print_ok "No guest account found"
+    fi
+    
+    # Check for guest account in lightdm
+    if [ -f /etc/lightdm/lightdm.conf ]; then
+        if ! grep -q "^allow-guest=false" /etc/lightdm/lightdm.conf 2>/dev/null; then
+            print_warning "Guest session may be enabled in LightDM"
+            if confirm_action "Disable guest session in LightDM?"; then
+                backup_file /etc/lightdm/lightdm.conf
+                if grep -q "allow-guest" /etc/lightdm/lightdm.conf; then
+                    sed -i 's/allow-guest=.*/allow-guest=false/' /etc/lightdm/lightdm.conf
+                else
+                    echo "allow-guest=false" >> /etc/lightdm/lightdm.conf
+                fi
+                print_fixed "Disabled guest session"
+            fi
+        fi
+    fi
+    
+    # Create lightdm.conf.d if needed
+    if [ -d /etc/lightdm/lightdm.conf.d ]; then
+        if [ ! -f /etc/lightdm/lightdm.conf.d/50-no-guest.conf ]; then
+            if confirm_action "Create no-guest configuration?"; then
+                echo "[Seat:*]" > /etc/lightdm/lightdm.conf.d/50-no-guest.conf
+                echo "allow-guest=false" >> /etc/lightdm/lightdm.conf.d/50-no-guest.conf
+                print_fixed "Created guest disable configuration"
+            fi
+        fi
+    fi
+    
+    print_subsection "Configuring password policy"
+    
+    # Install libpam-cracklib if not present
+    if ! dpkg -l | grep -q "libpam-cracklib"; then
+        print_warning "libpam-cracklib not installed"
+        if confirm_action "Install libpam-cracklib for password complexity?"; then
+            apt-get install -y libpam-cracklib
+            print_fixed "Installed libpam-cracklib"
+        fi
+    else
+        print_ok "libpam-cracklib is installed"
+    fi
+    
+    # Check /etc/login.defs
+    if [ -f /etc/login.defs ]; then
+        backup_file /etc/login.defs
+        
+        # Check PASS_MAX_DAYS
+        current_max=$(grep "^PASS_MAX_DAYS" /etc/login.defs | awk '{print $2}')
+        if [ -z "$current_max" ] || [ "$current_max" -gt 90 ]; then
+            print_issue "PASS_MAX_DAYS is $current_max (should be 90 or less)"
+            if confirm_action "Set PASS_MAX_DAYS to 90?"; then
+                sed -i 's/^PASS_MAX_DAYS.*/PASS_MAX_DAYS   90/' /etc/login.defs
+                print_fixed "Set PASS_MAX_DAYS to 90"
+            fi
+        else
+            print_ok "PASS_MAX_DAYS is set to $current_max"
+        fi
+        
+        # Check PASS_MIN_DAYS
+        current_min=$(grep "^PASS_MIN_DAYS" /etc/login.defs | awk '{print $2}')
+        if [ -z "$current_min" ] || [ "$current_min" -lt 0 ]; then
+            print_issue "PASS_MIN_DAYS is $current_min"
+            if confirm_action "Set PASS_MIN_DAYS to 0?"; then
+                sed -i 's/^PASS_MIN_DAYS.*/PASS_MIN_DAYS   0/' /etc/login.defs
+                print_fixed "Set PASS_MIN_DAYS to 0"
+            fi
+        else
+            print_ok "PASS_MIN_DAYS is set to $current_min"
+        fi
+        
+        # Check PASS_WARN_AGE
+        current_warn=$(grep "^PASS_WARN_AGE" /etc/login.defs | awk '{print $2}')
+        if [ -z "$current_warn" ] || [ "$current_warn" -lt 7 ]; then
+            print_issue "PASS_WARN_AGE is $current_warn (should be 7 or more)"
+            if confirm_action "Set PASS_WARN_AGE to 7?"; then
+                sed -i 's/^PASS_WARN_AGE.*/PASS_WARN_AGE   7/' /etc/login.defs
+                print_fixed "Set PASS_WARN_AGE to 7"
+            fi
+        else
+            print_ok "PASS_WARN_AGE is set to $current_warn"
+        fi
+        
+        # Check PASS_MIN_LEN
+        if ! grep -q "^PASS_MIN_LEN" /etc/login.defs; then
+            if confirm_action "Add PASS_MIN_LEN (8)?"; then
+                echo "PASS_MIN_LEN    8" >> /etc/login.defs
+                print_fixed "Added PASS_MIN_LEN = 8"
+            fi
+        fi
+    fi
+    
+    print_subsection "Checking PAM configuration"
+    
+    # Check common-password
+    if [ -f /etc/pam.d/common-password ]; then
+        backup_file /etc/pam.d/common-password
+        
+        # Check for password history (remember)
+        if ! grep -q "remember=" /etc/pam.d/common-password; then
+            print_warning "Password history (remember) not configured"
+            if confirm_action "Add password history (remember=5)?"; then
+                sed -i '/pam_unix.so/ s/$/ remember=5/' /etc/pam.d/common-password
+                print_fixed "Added password history setting"
+            fi
+        else
+            print_ok "Password history is configured"
+        fi
+        
+        # Check for minlen
+        if ! grep -q "minlen=" /etc/pam.d/common-password; then
+            print_warning "Minimum password length not configured"
+            if confirm_action "Add minimum password length (minlen=8)?"; then
+                sed -i '/pam_unix.so/ s/$/ minlen=8/' /etc/pam.d/common-password
+                print_fixed "Added minimum password length"
+            fi
+        else
+            print_ok "Minimum password length is configured"
+        fi
+    fi
+    
+    # Check common-auth for account lockout
+    if [ -f /etc/pam.d/common-auth ]; then
+        backup_file /etc/pam.d/common-auth
+        
+        if ! grep -q "pam_tally2.so\|pam_faillock.so" /etc/pam.d/common-auth; then
+            print_warning "Account lockout not configured"
+            if confirm_action "Add account lockout policy (5 attempts, 30 min lockout)?"; then
+                # Check if pam_faillock is available (newer systems)
+                if [ -f /lib/x86_64-linux-gnu/security/pam_faillock.so ] || [ -f /lib/security/pam_faillock.so ]; then
+                    echo "auth required pam_faillock.so deny=5 unlock_time=1800" >> /etc/pam.d/common-auth
+                else
+                    echo "auth required pam_tally2.so deny=5 onerr=fail unlock_time=1800" >> /etc/pam.d/common-auth
+                fi
+                print_fixed "Added account lockout policy"
+            fi
+        else
+            print_ok "Account lockout is configured"
+        fi
+    fi
+    
+    print_subsection "Checking user groups"
+    
+    # Check sudo group members
+    echo ""
+    print_info "Users in sudo group:"
+    getent group sudo | cut -d: -f4 | tr ',' '\n' | while read user; do
+        echo "    - $user"
+    done
+    
+    # Check admin group members
+    if getent group admin > /dev/null 2>&1; then
+        print_info "Users in admin group:"
+        getent group admin | cut -d: -f4 | tr ',' '\n' | while read user; do
+            echo "    - $user"
+        done
+    fi
+    
+    print_subsection "Checking root account security"
+    
+    # Check /etc/securetty
+    if [ -f /etc/securetty ]; then
+        tty_count=$(wc -l < /etc/securetty)
+        print_info "/etc/securetty has $tty_count entries"
+        if [ "$tty_count" -gt 2 ]; then
+            print_warning "Consider reducing TTY access in /etc/securetty"
+        fi
+    else
+        print_ok "/etc/securetty not present (root console access may be restricted)"
+    fi
+    
+    # Check if root has a password set
+    root_pass=$(grep "^root:" /etc/shadow | cut -d: -f2)
+    if [ "$root_pass" = "*" ] || [ "$root_pass" = "!" ]; then
+        print_ok "Root account is locked"
+    else
+        print_warning "Root account has a password set - ensure it's strong"
+    fi
+    
+    print_ok "User policy check completed"
+}
+
+#===============================================================================
+# 5. FIREWALL CONFIGURATION
+#===============================================================================
+
+configure_firewall() {
+    print_section "5. FIREWALL CONFIGURATION"
+    
+    print_subsection "Checking UFW status"
+    
+    # Check if UFW is installed
+    if ! command -v ufw &> /dev/null; then
+        print_issue "UFW is not installed"
+        if confirm_action "Install UFW?"; then
+            apt-get install -y ufw
+            print_fixed "Installed UFW"
+        else
+            return
+        fi
+    else
+        print_ok "UFW is installed"
+    fi
+    
+    # Check if UFW is enabled
+    ufw_status=$(ufw status | head -1)
+    if echo "$ufw_status" | grep -q "inactive"; then
+        print_issue "UFW is not enabled"
+        if confirm_action "Enable UFW firewall?"; then
+            # Set default policies
+            ufw default deny incoming
+            ufw default allow outgoing
+            ufw --force enable
+            print_fixed "Enabled UFW with default deny incoming policy"
+        fi
+    else
+        print_ok "UFW is enabled"
+        echo ""
+        print_info "Current UFW rules:"
+        ufw status numbered | head -20
+    fi
+    
+    print_ok "Firewall check completed"
+}
+
+#===============================================================================
+# 6. ANTI-MALWARE / ROOTKIT DETECTION
+#===============================================================================
+
+check_malware() {
+    print_section "6. ANTI-MALWARE / ROOTKIT DETECTION"
+    
+    print_subsection "Checking for security scanning tools"
+    
+    # Install chkrootkit
+    if ! command -v chkrootkit &> /dev/null; then
+        print_warning "chkrootkit is not installed"
+        if confirm_action "Install chkrootkit?"; then
+            apt-get install -y chkrootkit
+            print_fixed "Installed chkrootkit"
+        fi
+    else
+        print_ok "chkrootkit is installed"
+    fi
+    
+    # Install rkhunter
+    if ! command -v rkhunter &> /dev/null; then
+        print_warning "rkhunter is not installed"
+        if confirm_action "Install rkhunter?"; then
+            apt-get install -y rkhunter
+            # Update rkhunter database
+            rkhunter --update 2>/dev/null || true
+            rkhunter --propupd 2>/dev/null || true
+            print_fixed "Installed rkhunter"
+        fi
+    else
+        print_ok "rkhunter is installed"
+    fi
+    
+    # Install ClamAV
+    if ! command -v clamscan &> /dev/null; then
+        print_warning "ClamAV is not installed"
+        if confirm_action "Install ClamAV antivirus?"; then
+            apt-get install -y clamav clamav-daemon
+            # Update virus definitions
+            systemctl stop clamav-freshclam 2>/dev/null || true
+            freshclam 2>/dev/null || true
+            systemctl start clamav-freshclam 2>/dev/null || true
+            print_fixed "Installed ClamAV"
+        fi
+    else
+        print_ok "ClamAV is installed"
+    fi
+    
+    print_subsection "Running quick security scan"
+    
+    if confirm_action "Run quick rootkit scan with chkrootkit?"; then
+        if command -v chkrootkit &> /dev/null; then
+            echo ""
+            print_info "Running chkrootkit (this may take a moment)..."
+            chkrootkit 2>/dev/null | grep -E "INFECTED|Searching|Checking" | head -20
+            echo ""
+        fi
+    fi
+    
+    print_subsection "Checking for suspicious files"
+    
+    # Check /etc for suspicious files
+    print_info "Checking /etc for unusual executable files..."
+    suspicious_etc=$(find /etc -type f -perm /111 2>/dev/null | grep -v -E "\.(sh|py)$" | head -10)
+    if [ -n "$suspicious_etc" ]; then
+        print_warning "Executable files found in /etc (review these):"
+        echo "$suspicious_etc" | while read file; do
+            echo "    $file"
+        done
+    fi
+    
+    print_ok "Malware check completed"
+}
+
+#===============================================================================
+# 7. AUDITING CONFIGURATION
+#===============================================================================
+
+configure_auditing() {
+    print_section "7. SYSTEM AUDITING"
+    
+    print_subsection "Checking auditd"
+    
+    # Install auditd
+    if ! command -v auditctl &> /dev/null; then
+        print_warning "auditd is not installed"
+        if confirm_action "Install auditd?"; then
+            apt-get install -y auditd audispd-plugins
+            print_fixed "Installed auditd"
+        fi
+    else
+        print_ok "auditd is installed"
+    fi
+    
+    # Enable auditd
+    if command -v auditctl &> /dev/null; then
+        if ! systemctl is-active --quiet auditd; then
+            print_warning "auditd is not running"
+            if confirm_action "Enable and start auditd?"; then
+                systemctl enable auditd
+                systemctl start auditd
+                auditctl -e 1
+                print_fixed "Enabled auditd"
+            fi
+        else
+            print_ok "auditd is running"
+        fi
+    fi
+    
+    print_subsection "Checking /etc/hosts file"
+    
+    if [ -f /etc/hosts ]; then
+        print_info "Contents of /etc/hosts:"
+        cat /etc/hosts | while read line; do
+            echo "    $line"
+        done
+        
+        # Check for suspicious entries
+        suspicious_hosts=$(grep -v -E "^#|^$|localhost|ip6-|ubuntu|$(hostname)" /etc/hosts 2>/dev/null || true)
+        if [ -n "$suspicious_hosts" ]; then
+            print_warning "Unusual entries found in /etc/hosts:"
+            echo "$suspicious_hosts" | while read line; do
+                echo "    $line"
+            done
+        fi
+    fi
+    
+    print_subsection "Checking SSH failed attempts"
+    
+    if [ -f /var/log/auth.log ]; then
+        ssh_failures=$(grep -c "sshd.*Failed" /var/log/auth.log 2>/dev/null || echo "0")
+        print_info "SSH failed login attempts: $ssh_failures"
+        
+        if [ "$ssh_failures" -gt 20 ]; then
+            print_warning "High number of SSH failed attempts detected"
+            print_info "Top 5 source IPs:"
+            grep "sshd.*Failed" /var/log/auth.log 2>/dev/null | \
+                grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | \
+                sort | uniq -c | sort -rn | head -5 | while read line; do
+                echo "    $line"
+            done
+        fi
+    fi
+    
+    print_ok "Auditing check completed"
+}
+
+#===============================================================================
+# 8. SERVICES AUDIT
+#===============================================================================
+
+check_services() {
+    print_section "8. SERVICES AUDIT"
+    
+    print_subsection "Checking running services"
+    
+    # List all running services
+    print_info "Currently running services:"
+    systemctl list-units --type=service --state=running 2>/dev/null | head -30
+    
+    # Check for potentially dangerous services
+    dangerous_services=(
+        "telnet" "rsh" "rlogin" "rexec" "tftp" "talk" "ntalk"
+        "xinetd" "finger" "rsh-server" "nis" "avahi-daemon"
+    )
+    
+    print_subsection "Checking for potentially dangerous services"
+    
+    for service in "${dangerous_services[@]}"; do
+        if systemctl is-active --quiet "$service" 2>/dev/null; then
+            print_issue "Potentially dangerous service running: $service"
+            if confirm_action "Stop and disable $service?"; then
+                systemctl stop "$service"
+                systemctl disable "$service"
+                print_fixed "Stopped and disabled $service"
+            fi
+        fi
+    done
+    
+    # Check for FTP services
+    ftp_services=("vsftpd" "proftpd" "pure-ftpd")
+    for service in "${ftp_services[@]}"; do
+        if systemctl is-active --quiet "$service" 2>/dev/null; then
+            print_warning "FTP service running: $service (verify if needed)"
+        fi
+    done
+    
+    print_ok "Services audit completed"
+}
+
+#===============================================================================
+# 9. PORT AUDIT
+#===============================================================================
+
+check_ports() {
+    print_section "9. NETWORK PORTS AUDIT"
+    
+    print_subsection "Checking listening ports"
+    
+    # Show all listening ports
+    print_info "Currently listening ports:"
+    ss -tuln 2>/dev/null | head -30
+    
+    # Check for potentially dangerous ports
+    dangerous_ports=(20 21 23 135 137 138 139 445 411 412 1433 3389 5900)
+    
+    print_subsection "Checking for potentially dangerous ports"
+    
+    for port in "${dangerous_ports[@]}"; do
+        if ss -tuln | grep -q ":$port "; then
+            case $port in
+                20|21) service_name="FTP" ;;
+                23) service_name="Telnet" ;;
+                135) service_name="RPC" ;;
+                137|138|139|445) service_name="SMB/NetBIOS" ;;
+                411|412) service_name="P2P" ;;
+                1433) service_name="MSSQL" ;;
+                3389) service_name="RDP" ;;
+                5900) service_name="VNC" ;;
+                *) service_name="Unknown" ;;
+            esac
+            print_warning "Port $port ($service_name) is open - verify if needed"
+        fi
+    done
+    
+    print_ok "Port audit completed"
+}
+
+#===============================================================================
+# 10. SERVER CONFIGURATIONS
+#===============================================================================
+
+check_server_configs() {
+    print_section "10. SERVER CONFIGURATIONS"
+    
+    print_subsection "Checking Apache2 configuration"
+    
+    if [ -f /etc/apache2/apache2.conf ]; then
+        print_info "Apache2 is installed"
+        backup_file /etc/apache2/apache2.conf
+        
+        # Check ServerTokens
+        if ! grep -q "^ServerTokens Prod" /etc/apache2/apache2.conf 2>/dev/null; then
+            print_warning "ServerTokens not set to Prod"
+            if confirm_action "Set ServerTokens to Prod?"; then
+                if grep -q "^ServerTokens" /etc/apache2/apache2.conf; then
+                    sed -i 's/^ServerTokens.*/ServerTokens Prod/' /etc/apache2/apache2.conf
+                else
+                    echo "ServerTokens Prod" >> /etc/apache2/apache2.conf
+                fi
+                print_fixed "Set ServerTokens to Prod"
+            fi
+        else
+            print_ok "ServerTokens is set to Prod"
+        fi
+        
+        # Check ServerSignature
+        if ! grep -q "^ServerSignature Off" /etc/apache2/apache2.conf 2>/dev/null; then
+            print_warning "ServerSignature not disabled"
+            if confirm_action "Disable ServerSignature?"; then
+                if grep -q "^ServerSignature" /etc/apache2/apache2.conf; then
+                    sed -i 's/^ServerSignature.*/ServerSignature Off/' /etc/apache2/apache2.conf
+                else
+                    echo "ServerSignature Off" >> /etc/apache2/apache2.conf
+                fi
+                print_fixed "Disabled ServerSignature"
+            fi
+        else
+            print_ok "ServerSignature is disabled"
+        fi
+        
+        # Check TraceEnable
+        if ! grep -q "^TraceEnable off" /etc/apache2/apache2.conf 2>/dev/null; then
+            print_warning "TraceEnable not disabled"
+            if confirm_action "Disable TraceEnable?"; then
+                if grep -q "^TraceEnable" /etc/apache2/apache2.conf; then
+                    sed -i 's/^TraceEnable.*/TraceEnable off/' /etc/apache2/apache2.conf
+                else
+                    echo "TraceEnable off" >> /etc/apache2/apache2.conf
+                fi
+                print_fixed "Disabled TraceEnable"
+            fi
+        else
+            print_ok "TraceEnable is disabled"
+        fi
+    else
+        print_info "Apache2 is not installed"
+    fi
+    
+    print_subsection "Checking SSH configuration"
+    
+    if [ -f /etc/ssh/sshd_config ]; then
+        print_info "SSH server is installed"
+        backup_file /etc/ssh/sshd_config
+        
+        # Check PermitRootLogin
+        if grep -qE "^PermitRootLogin (yes|without-password|prohibit-password)" /etc/ssh/sshd_config 2>/dev/null; then
+            print_warning "Root login via SSH may be enabled"
+            if confirm_action "Disable root login via SSH?"; then
+                sed -i 's/^PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+                print_fixed "Disabled root login via SSH"
+            fi
+        elif grep -q "^PermitRootLogin no" /etc/ssh/sshd_config 2>/dev/null; then
+            print_ok "Root login via SSH is disabled"
+        else
+            print_warning "PermitRootLogin not explicitly set"
+        fi
+        
+        # Check PermitEmptyPasswords
+        if grep -q "^PermitEmptyPasswords yes" /etc/ssh/sshd_config 2>/dev/null; then
+            print_issue "Empty passwords permitted for SSH"
+            if confirm_action "Disable empty passwords for SSH?"; then
+                sed -i 's/^PermitEmptyPasswords.*/PermitEmptyPasswords no/' /etc/ssh/sshd_config
+                print_fixed "Disabled empty passwords for SSH"
+            fi
+        else
+            print_ok "Empty passwords not permitted for SSH"
+        fi
+        
+        # Check X11Forwarding
+        if grep -q "^X11Forwarding yes" /etc/ssh/sshd_config 2>/dev/null; then
+            print_warning "X11 forwarding is enabled (disable if not needed)"
+        fi
+        
+        # Check Protocol
+        if grep -q "^Protocol 1" /etc/ssh/sshd_config 2>/dev/null; then
+            print_issue "SSH Protocol 1 is enabled"
+            if confirm_action "Force SSH Protocol 2 only?"; then
+                sed -i 's/^Protocol.*/Protocol 2/' /etc/ssh/sshd_config
+                print_fixed "Forced SSH Protocol 2"
+            fi
+        fi
+    else
+        print_info "SSH server is not installed"
+    fi
+    
+    print_ok "Server configuration check completed"
+}
+
+#===============================================================================
+# 11. DIRECTORY PERMISSIONS
+#===============================================================================
+
+check_permissions() {
+    print_section "11. DIRECTORY AND FILE PERMISSIONS"
+    
+    print_subsection "Checking critical file permissions"
+    
+    # /etc/passwd
+    check_file_perms "/etc/passwd" "644"
+    
+    # /etc/shadow
+    check_file_perms "/etc/shadow" "640"
+    
+    # /etc/group
+    check_file_perms "/etc/group" "644"
+    
+    # /etc/gshadow
+    check_file_perms "/etc/gshadow" "640"
+    
+    print_subsection "Checking directory permissions"
+    
+    # /tmp
+    if [ -d /tmp ]; then
+        tmp_perms=$(stat -c "%a" /tmp)
+        if [ "$tmp_perms" != "1777" ]; then
+            print_issue "/tmp has incorrect permissions: $tmp_perms (should be 1777)"
+            if confirm_action "Fix /tmp permissions?"; then
+                chmod 1777 /tmp
+                print_fixed "Set /tmp permissions to 1777"
+            fi
+        else
+            print_ok "/tmp permissions are correct (1777)"
+        fi
+    fi
+    
+    # /var/tmp
+    if [ -d /var/tmp ]; then
+        vartmp_perms=$(stat -c "%a" /var/tmp)
+        if [ "$vartmp_perms" != "1777" ]; then
+            print_issue "/var/tmp has incorrect permissions: $vartmp_perms (should be 1777)"
+            if confirm_action "Fix /var/tmp permissions?"; then
+                chmod 1777 /var/tmp
+                print_fixed "Set /var/tmp permissions to 1777"
+            fi
+        else
+            print_ok "/var/tmp permissions are correct (1777)"
+        fi
+    fi
+    
+    # /boot/grub or /boot/grub2
+    for grub_dir in /boot/grub /boot/grub2; do
+        if [ -d "$grub_dir" ]; then
+            grub_perms=$(stat -c "%a" "$grub_dir")
+            if [ "$grub_perms" != "700" ] && [ "$grub_perms" != "755" ]; then
+                print_warning "$grub_dir has permissions: $grub_perms"
+            else
+                print_ok "$grub_dir permissions are acceptable"
+            fi
+        fi
+    done
+    
+    print_subsection "Checking for world-writable files"
+    
+    print_info "Searching for world-writable files (excluding /proc, /sys, /dev)..."
+    world_writable=$(find / -xdev -type f -perm -0002 -not -path "/proc/*" -not -path "/sys/*" -not -path "/dev/*" 2>/dev/null | head -10)
+    
+    if [ -n "$world_writable" ]; then
+        print_warning "World-writable files found:"
+        echo "$world_writable" | while read file; do
+            echo "    $file"
+        done
+    else
+        print_ok "No unusual world-writable files found"
+    fi
+    
+    print_subsection "Checking for SUID/SGID files"
+    
+    print_info "Common SUID binaries (review for unauthorized additions):"
+    find /usr -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null | head -15 | while read file; do
+        echo "    $file"
+    done
+    
+    print_ok "Permission check completed"
+}
+
+check_file_perms() {
+    local file="$1"
+    local expected="$2"
+    
+    if [ -f "$file" ]; then
+        actual=$(stat -c "%a" "$file")
+        if [ "$actual" != "$expected" ]; then
+            print_issue "$file has incorrect permissions: $actual (should be $expected)"
+            if confirm_action "Fix $file permissions?"; then
+                chmod "$expected" "$file"
+                print_fixed "Set $file permissions to $expected"
+            fi
+        else
+            print_ok "$file permissions are correct ($expected)"
+        fi
+    fi
+}
+
+#===============================================================================
+# 12. ADDITIONAL SECURITY CHECKS
+#===============================================================================
+
+additional_checks() {
+    print_section "12. ADDITIONAL SECURITY CHECKS"
+    
+    print_subsection "Checking for USB automounting"
+    
+    # Check for USB automount in various locations
+    if [ -f /etc/udev/rules.d/85-no-automount.rules ]; then
+        print_ok "USB automount disabled via udev rules"
+    else
+        print_warning "USB automounting may be enabled"
+        if confirm_action "Disable USB automounting?"; then
+            echo 'ACTION=="add", SUBSYSTEMS=="usb", TEST=="block", ENV{UDISKS_IGNORE}="1"' > /etc/udev/rules.d/85-no-automount.rules
+            print_fixed "Created udev rule to disable USB automounting"
+        fi
+    fi
+    
+    print_subsection "Checking for prohibited media files"
+    
+    print_info "Checking for media files in user directories..."
+    media_extensions=("mp3" "mp4" "avi" "mkv" "flac" "wav" "mov")
+    
+    for ext in "${media_extensions[@]}"; do
+        count=$(find /home -name "*.$ext" -type f 2>/dev/null | wc -l)
+        if [ "$count" -gt 0 ]; then
+            print_warning "Found $count .$ext files in /home"
+        fi
+    done
+    
+    print_subsection "Checking kernel parameters"
+    
+    # Check IP forwarding
+    ip_forward=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)
+    if [ "$ip_forward" = "1" ]; then
+        print_warning "IP forwarding is enabled"
+    else
+        print_ok "IP forwarding is disabled"
+    fi
+    
+    # Check ICMP redirects
+    if [ "$(cat /proc/sys/net/ipv4/conf/all/accept_redirects 2>/dev/null)" = "1" ]; then
+        print_warning "ICMP redirects are accepted"
+    else
+        print_ok "ICMP redirects are not accepted"
+    fi
+    
+    print_subsection "Checking for unowned files"
+    
+    print_info "Checking for files with no owner..."
+    noowner=$(find / -xdev -nouser -o -nogroup 2>/dev/null | head -5)
+    if [ -n "$noowner" ]; then
+        print_warning "Files with no owner found:"
+        echo "$noowner" | while read file; do
+            echo "    $file"
+        done
+    else
+        print_ok "No unowned files found"
+    fi
+    
+    print_ok "Additional checks completed"
+}
+
+#===============================================================================
+# SUMMARY AND REPORT
+#===============================================================================
+
+print_summary() {
+    print_section "SECURITY AUDIT SUMMARY"
+    
+    echo ""
+    echo -e "${BOLD}Results:${NC}"
+    echo -e "  Issues Found:  ${RED}$ISSUES_FOUND${NC}"
+    echo -e "  Issues Fixed:  ${GREEN}$ISSUES_FIXED${NC}"
+    echo -e "  Warnings:      ${YELLOW}$WARNINGS${NC}"
+    echo ""
+    
+    if [ "$CHECK_ONLY" = true ]; then
+        echo -e "${YELLOW}Note: Running in check-only mode. No changes were made.${NC}"
+        echo -e "Run without --check-only to fix issues."
+    fi
+    
+    echo ""
+    echo -e "Log file: ${CYAN}$LOG_FILE${NC}"
+    
+    if [ -d "$BACKUP_DIR" ]; then
+        echo -e "Backups stored in: ${CYAN}$BACKUP_DIR${NC}"
+    fi
+    
+    echo ""
+    echo -e "${BOLD}Recommended manual actions:${NC}"
+    echo "  1. Review user accounts and remove unauthorized users"
+    echo "  2. Review installed software and remove unnecessary programs"
+    echo "  3. Update all packages: sudo apt update && sudo apt upgrade"
+    echo "  4. Review cron jobs and scheduled tasks"
+    echo "  5. Check for and apply security updates"
+    echo "  6. Review firewall rules and open ports"
+    echo ""
+}
+
+#===============================================================================
+# MAIN EXECUTION
+#===============================================================================
+
+main() {
+    parse_arguments "$@"
+    check_root
+    
+    print_banner
+    
+    echo -e "${YELLOW}Script started at $(date)${NC}"
+    echo ""
+    
+    if [ "$CHECK_ONLY" = true ]; then
+        echo -e "${CYAN}Running in CHECK-ONLY mode (no changes will be made)${NC}"
+    elif [ "$AUTO_FIX" = true ]; then
+        echo -e "${CYAN}Running in AUTO-FIX mode (issues will be fixed automatically)${NC}"
+    else
+        echo -e "${CYAN}Running in INTERACTIVE mode (you will be prompted for each fix)${NC}"
+    fi
+    
+    echo ""
+    
+    # Create log file
+    touch "$LOG_FILE"
+    log_message "Script started"
+    log_message "Mode: CHECK_ONLY=$CHECK_ONLY, AUTO_FIX=$AUTO_FIX"
+    
+    # Run all checks
+    check_system_logs
+    check_installed_software
+    check_cron_jobs
+    check_user_policy
+    configure_firewall
+    check_malware
+    configure_auditing
+    check_services
+    check_ports
+    check_server_configs
+    check_permissions
+    additional_checks
+    
+    # Print summary
+    print_summary
+    
+    log_message "Script completed"
+    
+    echo -e "${GREEN}Security audit completed!${NC}"
+}
+
+# Run main function
+main "$@"
