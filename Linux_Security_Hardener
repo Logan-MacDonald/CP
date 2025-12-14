@@ -1,4 +1,4 @@
-<#
+#
 .SYNOPSIS
     Windows Server 2022 Security Hardening Script
     Based on CIS Benchmarks, Microsoft Security Baselines, and NIST Guidelines
@@ -24,7 +24,7 @@
     Version:        1.0
     Author:         Security Hardening Script
     Requires:       Windows Server 2022, PowerShell 5.1+, Administrator privileges
-#>
+#
 
 [CmdletBinding()]
 param(
