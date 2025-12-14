@@ -1,0 +1,2110 @@
+<#
+.SYNOPSIS
+    Windows Server 2022 Security Hardening Script
+    Based on CIS Benchmarks, Microsoft Security Baselines, and NIST Guidelines
+
+.DESCRIPTION
+    This script performs comprehensive security auditing and hardening for Windows Server 2022.
+    It covers user policies, services, firewall, registry settings, audit policies, and more.
+
+.PARAMETER Mode
+    CheckOnly    - Only perform checks without making changes
+    Interactive  - Prompt before each change (default)
+    AutoFix      - Automatically apply all fixes
+
+.PARAMETER GenerateReport
+    Generate an HTML report of findings
+
+.EXAMPLE
+    .\Windows_Server_2022_Hardening.ps1 -Mode CheckOnly
+    .\Windows_Server_2022_Hardening.ps1 -Mode Interactive
+    .\Windows_Server_2022_Hardening.ps1 -Mode AutoFix -GenerateReport
+
+.NOTES
+    Version:        1.0
+    Author:         Security Hardening Script
+    Requires:       Windows Server 2022, PowerShell 5.1+, Administrator privileges
+#>
+
+[CmdletBinding()]
+param(
+    [ValidateSet("CheckOnly", "Interactive", "AutoFix")]
+    [string]$Mode = "Interactive",
+    
+    [switch]$GenerateReport
+)
+
+#Requires -RunAsAdministrator
+#Requires -Version 5.1
+
+#===============================================================================
+# INITIALIZATION
+#===============================================================================
+
+$ErrorActionPreference = "Continue"
+$Script:LogFile = "$env:SystemDrive\SecurityHardening\Logs\Hardening_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+$Script:BackupDir = "$env:SystemDrive\SecurityHardening\Backups\$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+$Script:ReportFile = "$env:SystemDrive\SecurityHardening\Reports\Report_$(Get-Date -Format 'yyyyMMdd_HHmmss').html"
+
+# Counters
+$Script:IssuesFound = 0
+$Script:IssuesFixed = 0
+$Script:Warnings = 0
+$Script:Findings = @()
+
+# Create directories
+New-Item -ItemType Directory -Path "$env:SystemDrive\SecurityHardening\Logs" -Force | Out-Null
+New-Item -ItemType Directory -Path "$env:SystemDrive\SecurityHardening\Backups" -Force | Out-Null
+New-Item -ItemType Directory -Path "$env:SystemDrive\SecurityHardening\Reports" -Force | Out-Null
+New-Item -ItemType Directory -Path $Script:BackupDir -Force | Out-Null
+
+#===============================================================================
+# UTILITY FUNCTIONS
+#===============================================================================
+
+function Write-Log {
+    param([string]$Message, [string]$Level = "INFO")
+    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$Timestamp [$Level] $Message" | Out-File -FilePath $Script:LogFile -Append
+}
+
+function Write-Banner {
+    $Banner = @"
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║          Windows Server 2022 Security Hardening Script v1.0                  ║
+║                                                                              ║
+║          Based on: CIS Benchmarks | Microsoft Baselines | NIST              ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+"@
+    Write-Host $Banner -ForegroundColor Cyan
+}
+
+function Write-Section {
+    param([string]$Title)
+    Write-Host ""
+    Write-Host ("=" * 80) -ForegroundColor Blue
+    Write-Host "  $Title" -ForegroundColor Blue
+    Write-Host ("=" * 80) -ForegroundColor Blue
+    Write-Log "=== $Title ==="
+}
+
+function Write-SubSection {
+    param([string]$Title)
+    Write-Host ""
+    Write-Host "--- $Title ---" -ForegroundColor Cyan
+    Write-Log "--- $Title ---"
+}
+
+function Write-Ok {
+    param([string]$Message)
+    Write-Host "[OK] " -ForegroundColor Green -NoNewline
+    Write-Host $Message
+    Write-Log $Message "OK"
+}
+
+function Write-Issue {
+    param([string]$Message, [string]$Category = "General", [string]$Severity = "Medium")
+    Write-Host "[ISSUE] " -ForegroundColor Red -NoNewline
+    Write-Host $Message
+    Write-Log $Message "ISSUE"
+    $Script:IssuesFound++
+    $Script:Findings += [PSCustomObject]@{
+        Category = $Category
+        Severity = $Severity
+        Finding = $Message
+        Status = "Open"
+    }
+}
+
+function Write-Warning2 {
+    param([string]$Message)
+    Write-Host "[WARNING] " -ForegroundColor Yellow -NoNewline
+    Write-Host $Message
+    Write-Log $Message "WARNING"
+    $Script:Warnings++
+}
+
+function Write-Info {
+    param([string]$Message)
+    Write-Host "[INFO] " -ForegroundColor Blue -NoNewline
+    Write-Host $Message
+    Write-Log $Message "INFO"
+}
+
+function Write-Fixed {
+    param([string]$Message)
+    Write-Host "[FIXED] " -ForegroundColor Green -NoNewline
+    Write-Host $Message
+    Write-Log $Message "FIXED"
+    $Script:IssuesFixed++
+}
+
+function Confirm-Action {
+    param([string]$Message)
+    
+    if ($Mode -eq "AutoFix") { return $true }
+    if ($Mode -eq "CheckOnly") { return $false }
+    
+    $Response = Read-Host "$Message (Y/N)"
+    return ($Response -eq 'Y' -or $Response -eq 'y')
+}
+
+function Backup-RegistryKey {
+    param([string]$Path)
+    try {
+        $BackupName = ($Path -replace '\\', '_' -replace ':', '') + ".reg"
+        $BackupPath = Join-Path $Script:BackupDir $BackupName
+        reg export $Path $BackupPath /y 2>$null | Out-Null
+        Write-Info "Backed up registry: $Path"
+    }
+    catch {
+        Write-Warning2 "Failed to backup registry key: $Path"
+    }
+}
+
+function Set-RegistryValue {
+    param(
+        [string]$Path,
+        [string]$Name,
+        [object]$Value,
+        [string]$Type = "DWord"
+    )
+    
+    try {
+        if (!(Test-Path $Path)) {
+            New-Item -Path $Path -Force | Out-Null
+        }
+        Set-ItemProperty -Path $Path -Name $Name -Value $Value -Type $Type -Force
+        return $true
+    }
+    catch {
+        Write-Warning2 "Failed to set registry value: $Path\$Name"
+        return $false
+    }
+}
+
+function Get-RegistryValue {
+    param(
+        [string]$Path,
+        [string]$Name
+    )
+    
+    try {
+        return (Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop).$Name
+    }
+    catch {
+        return $null
+    }
+}
+
+#===============================================================================
+# 1. SYSTEM INFORMATION AND PREREQUISITES
+#===============================================================================
+
+function Get-SystemInfo {
+    Write-Section "1. SYSTEM INFORMATION"
+    
+    $OS = Get-CimInstance -ClassName Win32_OperatingSystem
+    $Computer = Get-CimInstance -ClassName Win32_ComputerSystem
+    
+    Write-Info "Computer Name: $($Computer.Name)"
+    Write-Info "Domain: $($Computer.Domain)"
+    Write-Info "OS: $($OS.Caption)"
+    Write-Info "Version: $($OS.Version)"
+    Write-Info "Build: $($OS.BuildNumber)"
+    Write-Info "Install Date: $($OS.InstallDate)"
+    Write-Info "Last Boot: $($OS.LastBootUpTime)"
+    
+    # Check if this is Server 2022
+    if ($OS.BuildNumber -lt 20348) {
+        Write-Warning2 "This script is designed for Windows Server 2022. Current build: $($OS.BuildNumber)"
+    }
+    
+    # Check domain status
+    if ($Computer.PartOfDomain) {
+        Write-Info "Server is domain-joined"
+        Write-Warning2 "Some settings may be controlled by Group Policy"
+    }
+    else {
+        Write-Info "Server is standalone (workgroup)"
+    }
+}
+
+#===============================================================================
+# 2. ACCOUNT POLICIES
+#===============================================================================
+
+function Set-AccountPolicies {
+    Write-Section "2. ACCOUNT POLICIES (CIS 1.1-1.2)"
+    
+    Write-SubSection "Password Policy"
+    
+    # Export current security policy
+    $SecPolPath = Join-Path $Script:BackupDir "secpol_backup.inf"
+    secedit /export /cfg $SecPolPath /quiet
+    
+    # Get current settings
+    $SecPol = Get-Content $SecPolPath
+    
+    # Password History (CIS 1.1.1 - 24 passwords remembered)
+    $PasswordHistory = ($SecPol | Select-String "PasswordHistorySize").ToString().Split("=")[1].Trim()
+    if ([int]$PasswordHistory -lt 24) {
+        Write-Issue "Password history is $PasswordHistory (should be 24+)" -Category "Account Policy" -Severity "Medium"
+        if (Confirm-Action "Set password history to 24?") {
+            net accounts /uniquepw:24 | Out-Null
+            Write-Fixed "Set password history to 24"
+        }
+    }
+    else {
+        Write-Ok "Password history: $PasswordHistory (compliant)"
+    }
+    
+    # Maximum Password Age (CIS 1.1.2 - 365 days or less, typically 60-90)
+    $MaxPwdAge = ($SecPol | Select-String "MaximumPasswordAge").ToString().Split("=")[1].Trim()
+    if ([int]$MaxPwdAge -gt 365 -or [int]$MaxPwdAge -eq -1) {
+        Write-Issue "Maximum password age is $MaxPwdAge days (should be 365 or less)" -Category "Account Policy" -Severity "Medium"
+        if (Confirm-Action "Set maximum password age to 90 days?") {
+            net accounts /maxpwage:90 | Out-Null
+            Write-Fixed "Set maximum password age to 90 days"
+        }
+    }
+    else {
+        Write-Ok "Maximum password age: $MaxPwdAge days (compliant)"
+    }
+    
+    # Minimum Password Age (CIS 1.1.3 - 1 day or more)
+    $MinPwdAge = ($SecPol | Select-String "MinimumPasswordAge").ToString().Split("=")[1].Trim()
+    if ([int]$MinPwdAge -lt 1) {
+        Write-Issue "Minimum password age is $MinPwdAge days (should be 1+)" -Category "Account Policy" -Severity "Low"
+        if (Confirm-Action "Set minimum password age to 1 day?") {
+            net accounts /minpwage:1 | Out-Null
+            Write-Fixed "Set minimum password age to 1 day"
+        }
+    }
+    else {
+        Write-Ok "Minimum password age: $MinPwdAge days (compliant)"
+    }
+    
+    # Minimum Password Length (CIS 1.1.4 - 14 characters)
+    $MinPwdLen = ($SecPol | Select-String "MinimumPasswordLength").ToString().Split("=")[1].Trim()
+    if ([int]$MinPwdLen -lt 14) {
+        Write-Issue "Minimum password length is $MinPwdLen (should be 14+)" -Category "Account Policy" -Severity "High"
+        if (Confirm-Action "Set minimum password length to 14?") {
+            net accounts /minpwlen:14 | Out-Null
+            Write-Fixed "Set minimum password length to 14"
+        }
+    }
+    else {
+        Write-Ok "Minimum password length: $MinPwdLen (compliant)"
+    }
+    
+    Write-SubSection "Account Lockout Policy"
+    
+    # Account Lockout Duration (CIS 1.2.1 - 15 minutes or more)
+    $LockoutDuration = ($SecPol | Select-String "LockoutDuration").ToString().Split("=")[1].Trim()
+    if ([int]$LockoutDuration -lt 15 -and [int]$LockoutDuration -ne -1) {
+        Write-Issue "Account lockout duration is $LockoutDuration minutes (should be 15+)" -Category "Account Policy" -Severity "Medium"
+        if (Confirm-Action "Set lockout duration to 30 minutes?") {
+            net accounts /lockoutduration:30 | Out-Null
+            Write-Fixed "Set lockout duration to 30 minutes"
+        }
+    }
+    else {
+        Write-Ok "Account lockout duration: $LockoutDuration minutes (compliant)"
+    }
+    
+    # Account Lockout Threshold (CIS 1.2.2 - 5 or fewer, but not 0)
+    $LockoutThreshold = ($SecPol | Select-String "LockoutBadCount").ToString().Split("=")[1].Trim()
+    if ([int]$LockoutThreshold -gt 5 -or [int]$LockoutThreshold -eq 0) {
+        Write-Issue "Account lockout threshold is $LockoutThreshold (should be 1-5)" -Category "Account Policy" -Severity "High"
+        if (Confirm-Action "Set lockout threshold to 5 attempts?") {
+            net accounts /lockoutthreshold:5 | Out-Null
+            Write-Fixed "Set lockout threshold to 5 attempts"
+        }
+    }
+    else {
+        Write-Ok "Account lockout threshold: $LockoutThreshold (compliant)"
+    }
+    
+    # Reset Account Lockout Counter (CIS 1.2.3 - 15 minutes or more)
+    $LockoutWindow = ($SecPol | Select-String "ResetLockoutCount").ToString().Split("=")[1].Trim()
+    if ([int]$LockoutWindow -lt 15) {
+        Write-Issue "Lockout counter reset is $LockoutWindow minutes (should be 15+)" -Category "Account Policy" -Severity "Medium"
+        if (Confirm-Action "Set lockout window to 30 minutes?") {
+            net accounts /lockoutwindow:30 | Out-Null
+            Write-Fixed "Set lockout window to 30 minutes"
+        }
+    }
+    else {
+        Write-Ok "Lockout counter reset: $LockoutWindow minutes (compliant)"
+    }
+}
+
+#===============================================================================
+# 3. LOCAL POLICIES - USER RIGHTS ASSIGNMENT
+#===============================================================================
+
+function Set-UserRightsAssignment {
+    Write-Section "3. USER RIGHTS ASSIGNMENT (CIS 2.2)"
+    
+    Write-SubSection "Checking Critical User Rights"
+    
+    # Get current user rights
+    $SecPolPath = Join-Path $env:TEMP "secpol_rights.inf"
+    secedit /export /cfg $SecPolPath /quiet
+    $SecPol = Get-Content $SecPolPath
+    
+    # Debug/Programs (CIS 2.2.14 - Should be Administrators only)
+    $DebugPrograms = ($SecPol | Select-String "SeDebugPrivilege")
+    if ($DebugPrograms) {
+        $DebugUsers = $DebugPrograms.ToString().Split("=")[1].Trim()
+        if ($DebugUsers -ne "*S-1-5-32-544") {
+            Write-Warning2 "Debug programs right assigned to: $DebugUsers (should be Administrators only)"
+        }
+        else {
+            Write-Ok "Debug programs: Administrators only"
+        }
+    }
+    
+    # Remote Desktop (CIS 2.2.26)
+    $RDPUsers = ($SecPol | Select-String "SeRemoteInteractiveLogonRight")
+    if ($RDPUsers) {
+        Write-Info "Remote Desktop access granted to: $($RDPUsers.ToString().Split('=')[1].Trim())"
+    }
+    
+    # Deny access from network (CIS 2.2.17)
+    $DenyNetwork = ($SecPol | Select-String "SeDenyNetworkLogonRight")
+    if (!$DenyNetwork -or $DenyNetwork.ToString() -notmatch "Guest") {
+        Write-Issue "Guest account should be denied network access" -Category "User Rights" -Severity "Medium"
+    }
+    else {
+        Write-Ok "Guest account denied network access"
+    }
+    
+    # Shut down the system (CIS 2.2.36)
+    $ShutdownRight = ($SecPol | Select-String "SeShutdownPrivilege")
+    if ($ShutdownRight) {
+        Write-Info "Shutdown right granted to: $($ShutdownRight.ToString().Split('=')[1].Trim())"
+    }
+    
+    # Take ownership (CIS 2.2.39)
+    $TakeOwnership = ($SecPol | Select-String "SeTakeOwnershipPrivilege")
+    if ($TakeOwnership) {
+        $TOUsers = $TakeOwnership.ToString().Split("=")[1].Trim()
+        if ($TOUsers -ne "*S-1-5-32-544") {
+            Write-Warning2 "Take ownership right assigned to: $TOUsers (should be Administrators only)"
+        }
+        else {
+            Write-Ok "Take ownership: Administrators only"
+        }
+    }
+    
+    Remove-Item $SecPolPath -Force -ErrorAction SilentlyContinue
+}
+
+#===============================================================================
+# 4. SECURITY OPTIONS
+#===============================================================================
+
+function Set-SecurityOptions {
+    Write-Section "4. SECURITY OPTIONS (CIS 2.3)"
+    
+    Write-SubSection "Accounts Settings"
+    
+    # Administrator account status (CIS 2.3.1.1)
+    $AdminAccount = Get-LocalUser -Name "Administrator" -ErrorAction SilentlyContinue
+    if ($AdminAccount -and $AdminAccount.Enabled) {
+        Write-Warning2 "Built-in Administrator account is enabled (consider disabling or renaming)"
+    }
+    else {
+        Write-Ok "Built-in Administrator account is disabled"
+    }
+    
+    # Guest account status (CIS 2.3.1.2)
+    $GuestAccount = Get-LocalUser -Name "Guest" -ErrorAction SilentlyContinue
+    if ($GuestAccount -and $GuestAccount.Enabled) {
+        Write-Issue "Guest account is enabled" -Category "Security Options" -Severity "High"
+        if (Confirm-Action "Disable Guest account?") {
+            Disable-LocalUser -Name "Guest"
+            Write-Fixed "Disabled Guest account"
+        }
+    }
+    else {
+        Write-Ok "Guest account is disabled"
+    }
+    
+    Write-SubSection "Interactive Logon Settings"
+    
+    $RegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+    
+    # Don't display last username (CIS 2.3.7.1)
+    $DontDisplayLastUser = Get-RegistryValue -Path $RegPath -Name "DontDisplayLastUserName"
+    if ($DontDisplayLastUser -ne 1) {
+        Write-Issue "Last username is displayed at logon" -Category "Security Options" -Severity "Low"
+        if (Confirm-Action "Hide last username at logon?") {
+            Backup-RegistryKey "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+            Set-RegistryValue -Path $RegPath -Name "DontDisplayLastUserName" -Value 1
+            Write-Fixed "Enabled: Don't display last username"
+        }
+    }
+    else {
+        Write-Ok "Last username not displayed at logon"
+    }
+    
+    # Machine inactivity limit (CIS 2.3.7.3 - 900 seconds or less)
+    $InactivityLimit = Get-RegistryValue -Path $RegPath -Name "InactivityTimeoutSecs"
+    if ($null -eq $InactivityLimit -or $InactivityLimit -gt 900 -or $InactivityLimit -eq 0) {
+        Write-Issue "Machine inactivity limit is not set or too high" -Category "Security Options" -Severity "Medium"
+        if (Confirm-Action "Set inactivity timeout to 900 seconds (15 min)?") {
+            Set-RegistryValue -Path $RegPath -Name "InactivityTimeoutSecs" -Value 900
+            Write-Fixed "Set inactivity timeout to 900 seconds"
+        }
+    }
+    else {
+        Write-Ok "Machine inactivity limit: $InactivityLimit seconds"
+    }
+    
+    # Legal notice (CIS 2.3.7.4 & 2.3.7.5)
+    $LegalCaption = Get-RegistryValue -Path $RegPath -Name "LegalNoticeCaption"
+    $LegalText = Get-RegistryValue -Path $RegPath -Name "LegalNoticeText"
+    if ([string]::IsNullOrEmpty($LegalCaption) -or [string]::IsNullOrEmpty($LegalText)) {
+        Write-Warning2 "Legal notice banner is not configured"
+    }
+    else {
+        Write-Ok "Legal notice banner is configured"
+    }
+    
+    Write-SubSection "Network Security Settings"
+    
+    # LAN Manager authentication level (CIS 2.3.11.7 - Send NTLMv2 response only)
+    $RegPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
+    $LMCompatLevel = Get-RegistryValue -Path $RegPath -Name "LmCompatibilityLevel"
+    if ($null -eq $LMCompatLevel -or $LMCompatLevel -lt 5) {
+        Write-Issue "LAN Manager auth level is $LMCompatLevel (should be 5 - NTLMv2 only)" -Category "Network Security" -Severity "High"
+        if (Confirm-Action "Set LAN Manager to NTLMv2 only?") {
+            Backup-RegistryKey "HKLM\SYSTEM\CurrentControlSet\Control\Lsa"
+            Set-RegistryValue -Path $RegPath -Name "LmCompatibilityLevel" -Value 5
+            Write-Fixed "Set LAN Manager to NTLMv2 only"
+        }
+    }
+    else {
+        Write-Ok "LAN Manager authentication: NTLMv2 only"
+    }
+    
+    # LDAP client signing (CIS 2.3.11.8)
+    $LDAPSigning = Get-RegistryValue -Path $RegPath -Name "LDAPClientIntegrity"
+    if ($null -eq $LDAPSigning -or $LDAPSigning -lt 1) {
+        Write-Issue "LDAP client signing is not required" -Category "Network Security" -Severity "Medium"
+        if (Confirm-Action "Require LDAP client signing?") {
+            Set-RegistryValue -Path $RegPath -Name "LDAPClientIntegrity" -Value 1
+            Write-Fixed "Enabled LDAP client signing"
+        }
+    }
+    else {
+        Write-Ok "LDAP client signing required"
+    }
+    
+    Write-SubSection "UAC Settings"
+    
+    $RegPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+    
+    # UAC - Admin Approval Mode (CIS 2.3.17.1)
+    $EnableLUA = Get-RegistryValue -Path $RegPath -Name "EnableLUA"
+    if ($EnableLUA -ne 1) {
+        Write-Issue "UAC is disabled" -Category "Security Options" -Severity "Critical"
+        if (Confirm-Action "Enable UAC?") {
+            Set-RegistryValue -Path $RegPath -Name "EnableLUA" -Value 1
+            Write-Fixed "Enabled UAC"
+        }
+    }
+    else {
+        Write-Ok "UAC is enabled"
+    }
+    
+    # UAC - Elevation prompt for administrators (CIS 2.3.17.2)
+    $ConsentPromptAdmin = Get-RegistryValue -Path $RegPath -Name "ConsentPromptBehaviorAdmin"
+    if ($null -eq $ConsentPromptAdmin -or $ConsentPromptAdmin -eq 0) {
+        Write-Warning2 "UAC does not prompt administrators for elevation"
+    }
+    else {
+        Write-Ok "UAC prompts for administrator elevation"
+    }
+    
+    # UAC - Detect application installations (CIS 2.3.17.4)
+    $EnableInstallerDetection = Get-RegistryValue -Path $RegPath -Name "EnableInstallerDetection"
+    if ($EnableInstallerDetection -ne 1) {
+        Write-Issue "UAC installer detection is disabled" -Category "Security Options" -Severity "Low"
+        if (Confirm-Action "Enable UAC installer detection?") {
+            Set-RegistryValue -Path $RegPath -Name "EnableInstallerDetection" -Value 1
+            Write-Fixed "Enabled UAC installer detection"
+        }
+    }
+    else {
+        Write-Ok "UAC installer detection enabled"
+    }
+}
+
+#===============================================================================
+# 5. WINDOWS FIREWALL
+#===============================================================================
+
+function Set-FirewallConfiguration {
+    Write-Section "5. WINDOWS FIREWALL (CIS 9)"
+    
+    Write-SubSection "Firewall Profile Status"
+    
+    $Profiles = @("Domain", "Private", "Public")
+    
+    foreach ($Profile in $Profiles) {
+        $FWProfile = Get-NetFirewallProfile -Name $Profile
+        
+        # Check if firewall is enabled (CIS 9.1.1, 9.2.1, 9.3.1)
+        if ($FWProfile.Enabled -ne $true) {
+            Write-Issue "$Profile firewall is disabled" -Category "Firewall" -Severity "Critical"
+            if (Confirm-Action "Enable $Profile firewall?") {
+                Set-NetFirewallProfile -Name $Profile -Enabled True
+                Write-Fixed "Enabled $Profile firewall"
+            }
+        }
+        else {
+            Write-Ok "$Profile firewall is enabled"
+        }
+        
+        # Check default inbound action (CIS 9.1.2, 9.2.2, 9.3.2)
+        if ($FWProfile.DefaultInboundAction -ne "Block") {
+            Write-Issue "$Profile firewall default inbound is not Block" -Category "Firewall" -Severity "High"
+            if (Confirm-Action "Set $Profile default inbound to Block?") {
+                Set-NetFirewallProfile -Name $Profile -DefaultInboundAction Block
+                Write-Fixed "Set $Profile default inbound to Block"
+            }
+        }
+        else {
+            Write-Ok "$Profile default inbound: Block"
+        }
+        
+        # Check logging (CIS 9.1.7, 9.2.7, 9.3.7)
+        if ($FWProfile.LogBlocked -ne $true) {
+            Write-Warning2 "$Profile firewall logging for blocked connections is disabled"
+            if (Confirm-Action "Enable $Profile firewall logging?") {
+                Set-NetFirewallProfile -Name $Profile -LogBlocked True -LogMaxSizeKilobytes 16384
+                Write-Fixed "Enabled $Profile firewall logging"
+            }
+        }
+        else {
+            Write-Ok "$Profile firewall logging enabled"
+        }
+    }
+    
+    Write-SubSection "Checking Firewall Rules"
+    
+    # Count enabled inbound rules
+    $InboundRules = Get-NetFirewallRule -Direction Inbound -Enabled True
+    Write-Info "Enabled inbound firewall rules: $($InboundRules.Count)"
+    
+    # Check for any allow rules
+    $AllowRules = $InboundRules | Where-Object { $_.Action -eq "Allow" }
+    Write-Info "Inbound allow rules: $($AllowRules.Count)"
+    
+    # List potentially risky open ports
+    Write-SubSection "Checking for Risky Open Ports"
+    
+    $RiskyPorts = @{
+        21 = "FTP"
+        23 = "Telnet"
+        135 = "RPC"
+        139 = "NetBIOS"
+        445 = "SMB"
+        1433 = "SQL Server"
+        3389 = "RDP"
+        5985 = "WinRM HTTP"
+        5986 = "WinRM HTTPS"
+    }
+    
+    foreach ($Port in $RiskyPorts.Keys) {
+        $Rule = Get-NetFirewallRule -Direction Inbound -Enabled True -ErrorAction SilentlyContinue | 
+                Get-NetFirewallPortFilter -ErrorAction SilentlyContinue | 
+                Where-Object { $_.LocalPort -eq $Port }
+        
+        if ($Rule) {
+            Write-Warning2 "Port $Port ($($RiskyPorts[$Port])) may be open - verify if required"
+        }
+    }
+}
+
+#===============================================================================
+# 6. AUDIT POLICY
+#===============================================================================
+
+function Set-AuditPolicy {
+    Write-Section "6. AUDIT POLICY (CIS 17)"
+    
+    Write-SubSection "Configuring Advanced Audit Policies"
+    
+    # Define required audit settings per CIS benchmarks
+    $AuditPolicies = @{
+        # Account Logon (CIS 17.1)
+        "Credential Validation" = "Success and Failure"
+        
+        # Account Management (CIS 17.2)
+        "Computer Account Management" = "Success"
+        "Other Account Management Events" = "Success"
+        "Security Group Management" = "Success"
+        "User Account Management" = "Success and Failure"
+        
+        # Detailed Tracking (CIS 17.3)
+        "PNP Activity" = "Success"
+        "Process Creation" = "Success"
+        
+        # Logon/Logoff (CIS 17.5)
+        "Account Lockout" = "Failure"
+        "Group Membership" = "Success"
+        "Logoff" = "Success"
+        "Logon" = "Success and Failure"
+        "Other Logon/Logoff Events" = "Success and Failure"
+        "Special Logon" = "Success"
+        
+        # Object Access (CIS 17.6)
+        "Removable Storage" = "Success and Failure"
+        
+        # Policy Change (CIS 17.7)
+        "Audit Policy Change" = "Success"
+        "Authentication Policy Change" = "Success"
+        "Authorization Policy Change" = "Success"
+        "MPSSVC Rule-Level Policy Change" = "Success and Failure"
+        
+        # Privilege Use (CIS 17.8)
+        "Sensitive Privilege Use" = "Success and Failure"
+        
+        # System (CIS 17.9)
+        "IPsec Driver" = "Success and Failure"
+        "Other System Events" = "Success and Failure"
+        "Security State Change" = "Success"
+        "Security System Extension" = "Success"
+        "System Integrity" = "Success and Failure"
+    }
+    
+    foreach ($Policy in $AuditPolicies.Keys) {
+        $CurrentSetting = (auditpol /get /subcategory:"$Policy" 2>$null | Select-String $Policy)
+        
+        if ($CurrentSetting) {
+            $CurrentValue = ($CurrentSetting -split '\s{2,}')[-1].Trim()
+            $RequiredValue = $AuditPolicies[$Policy]
+            
+            if ($CurrentValue -ne $RequiredValue -and $CurrentValue -ne "Success and Failure") {
+                Write-Warning2 "Audit: $Policy is '$CurrentValue' (should be '$RequiredValue')"
+                
+                if ($Mode -ne "CheckOnly") {
+                    if ($RequiredValue -eq "Success and Failure") {
+                        auditpol /set /subcategory:"$Policy" /success:enable /failure:enable 2>$null | Out-Null
+                    }
+                    elseif ($RequiredValue -eq "Success") {
+                        auditpol /set /subcategory:"$Policy" /success:enable 2>$null | Out-Null
+                    }
+                    elseif ($RequiredValue -eq "Failure") {
+                        auditpol /set /subcategory:"$Policy" /failure:enable 2>$null | Out-Null
+                    }
+                }
+            }
+            else {
+                Write-Ok "Audit: $Policy is properly configured"
+            }
+        }
+    }
+    
+    Write-SubSection "Event Log Configuration"
+    
+    # Security log size (CIS 18.9.27.1.1)
+    $SecurityLog = Get-WinEvent -ListLog Security
+    if ($SecurityLog.MaximumSizeInBytes -lt 196608KB) {
+        Write-Issue "Security event log size is too small: $([math]::Round($SecurityLog.MaximumSizeInBytes/1KB))KB" -Category "Audit" -Severity "Medium"
+        if (Confirm-Action "Set Security log to 196608KB?") {
+            wevtutil sl Security /ms:196608000
+            Write-Fixed "Set Security log size to 196608KB"
+        }
+    }
+    else {
+        Write-Ok "Security event log size: $([math]::Round($SecurityLog.MaximumSizeInBytes/1KB))KB"
+    }
+}
+
+#===============================================================================
+# 7. POTENTIALLY UNWANTED APPLICATIONS / HACKING TOOLS
+#===============================================================================
+
+function Check-HackingTools {
+    Write-Section "7. POTENTIALLY UNWANTED APPLICATIONS & HACKING TOOLS"
+    
+    Write-SubSection "Scanning for Security/Hacking Tools"
+    
+    # Define potentially dangerous/hacking tools to look for
+    $HackingTools = @{
+        # Network Scanning & Enumeration
+        "Nmap" = @("nmap", "zenmap")
+        "Angry IP Scanner" = @("ipscan", "angry")
+        "Advanced IP Scanner" = @("advanced ip scanner")
+        "Masscan" = @("masscan")
+        "Nessus" = @("nessus", "tenable")
+        "OpenVAS" = @("openvas")
+        
+        # Password Cracking
+        "John the Ripper" = @("john the ripper", "john-")
+        "Hashcat" = @("hashcat")
+        "Ophcrack" = @("ophcrack")
+        "Cain & Abel" = @("cain", "abel")
+        "L0phtCrack" = @("l0phtcrack", "lophtcrack")
+        "THC Hydra" = @("hydra", "thc-hydra")
+        "Medusa" = @("medusa")
+        "RainbowCrack" = @("rainbowcrack", "rtgen")
+        
+        # Exploitation Frameworks
+        "Metasploit" = @("metasploit", "msfconsole", "msfvenom")
+        "Cobalt Strike" = @("cobalt strike", "cobaltstrike")
+        "Empire" = @("powershell empire")
+        "BeEF" = @("beef-xss", "beef framework")
+        "Social Engineer Toolkit" = @("setoolkit", "social engineer")
+        "Veil Framework" = @("veil-evasion", "veil framework")
+        
+        # Network Sniffing & MITM
+        "Wireshark" = @("wireshark", "tshark")
+        "Ettercap" = @("ettercap")
+        "Cain" = @("cain")
+        "NetworkMiner" = @("networkminer")
+        "Responder" = @("responder")
+        "Bettercap" = @("bettercap")
+        "mitmproxy" = @("mitmproxy")
+        
+        # Wireless Hacking
+        "Aircrack-ng" = @("aircrack", "airodump", "aireplay")
+        "Kismet" = @("kismet")
+        "Wifite" = @("wifite")
+        "Fern WiFi Cracker" = @("fern wifi", "fern-wifi")
+        
+        # Web Application Testing
+        "Burp Suite" = @("burp", "burpsuite")
+        "OWASP ZAP" = @("owasp zap", "zaproxy")
+        "Nikto" = @("nikto")
+        "SQLMap" = @("sqlmap")
+        "DirBuster" = @("dirbuster")
+        "Gobuster" = @("gobuster")
+        "wfuzz" = @("wfuzz")
+        
+        # Remote Access / RATs
+        "Netcat" = @("netcat", "ncat", "nc.exe", "nc64.exe")
+        "PuTTY" = @("putty", "pscp", "psftp")  # Note: PuTTY is often legitimate
+        "TeamViewer" = @("teamviewer")  # Can be legitimate but often abused
+        "AnyDesk" = @("anydesk")  # Can be legitimate but often abused
+        "DameWare" = @("dameware")
+        
+        # Forensics & Recovery (can be misused)
+        "Mimikatz" = @("mimikatz")
+        "ProcDump" = @("procdump")
+        "Windows Credentials Editor" = @("wce.exe", "wce64")
+        "LaZagne" = @("lazagne")
+        "Rubeus" = @("rubeus")
+        
+        # Keyloggers
+        "Revealer Keylogger" = @("revealer keylogger")
+        "Ardamax" = @("ardamax")
+        "Spyrix" = @("spyrix")
+        
+        # Other Hacking Tools
+        "Maltego" = @("maltego")
+        "theHarvester" = @("theharvester")
+        "Recon-ng" = @("recon-ng")
+        "SpiderFoot" = @("spiderfoot")
+        "Shodan" = @("shodan")
+        "Censys" = @("censys")
+        "BloodHound" = @("bloodhound", "sharphound")
+        "PowerSploit" = @("powersploit")
+        "Impacket" = @("impacket")
+        "CrackMapExec" = @("crackmapexec", "cme")
+    }
+    
+    $FoundTools = @()
+    
+    # Method 1: Check installed programs via Registry (Uninstall keys)
+    Write-Info "Checking installed programs registry..."
+    
+    $UninstallPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    
+    $InstalledPrograms = @()
+    foreach ($Path in $UninstallPaths) {
+        $InstalledPrograms += Get-ItemProperty $Path -ErrorAction SilentlyContinue | 
+                             Select-Object DisplayName, DisplayVersion, Publisher, InstallLocation, UninstallString
+    }
+    
+    foreach ($ToolName in $HackingTools.Keys) {
+        foreach ($SearchTerm in $HackingTools[$ToolName]) {
+            $Found = $InstalledPrograms | Where-Object { 
+                $_.DisplayName -like "*$SearchTerm*" -or 
+                $_.Publisher -like "*$SearchTerm*" 
+            }
+            
+            if ($Found) {
+                foreach ($Item in $Found) {
+                    $FoundTools += [PSCustomObject]@{
+                        ToolCategory = $ToolName
+                        Name = $Item.DisplayName
+                        Version = $Item.DisplayVersion
+                        Location = $Item.InstallLocation
+                        UninstallString = $Item.UninstallString
+                        DetectionMethod = "Registry"
+                    }
+                }
+            }
+        }
+    }
+    
+    # Method 2: Check common installation directories
+    Write-Info "Checking common installation directories..."
+    
+    $SearchPaths = @(
+        "$env:ProgramFiles",
+        "${env:ProgramFiles(x86)}",
+        "$env:ProgramData",
+        "$env:LOCALAPPDATA",
+        "$env:APPDATA",
+        "$env:SystemDrive\Tools",
+        "$env:SystemDrive\Hacking",
+        "$env:SystemDrive\Pentest",
+        "$env:USERPROFILE\Desktop",
+        "$env:USERPROFILE\Downloads"
+    )
+    
+    $SuspiciousExes = @(
+        "nmap.exe", "zenmap.exe", "masscan.exe",
+        "john.exe", "hashcat.exe", "hashcat64.exe", "ophcrack.exe",
+        "hydra.exe", "medusa.exe",
+        "msfconsole.exe", "msfvenom.exe",
+        "wireshark.exe", "tshark.exe", "dumpcap.exe",
+        "ettercap.exe", "bettercap.exe",
+        "aircrack-ng.exe", "airodump-ng.exe",
+        "burpsuite.jar", "BurpSuiteCommunity.exe", "BurpSuitePro.exe",
+        "nikto.pl", "sqlmap.py",
+        "nc.exe", "nc64.exe", "ncat.exe", "netcat.exe",
+        "mimikatz.exe", "mimikatz_trunk.exe", "mimi.exe", "mimi64.exe",
+        "wce.exe", "wce64.exe",
+        "lazagne.exe",
+        "procdump.exe", "procdump64.exe",
+        "rubeus.exe",
+        "sharphound.exe", "bloodhound.exe",
+        "crackmapexec.exe", "cme.exe",
+        "responder.exe", "Responder.py",
+        "powersploit.ps1", "invoke-mimikatz.ps1"
+    )
+    
+    foreach ($SearchPath in $SearchPaths) {
+        if (Test-Path $SearchPath) {
+            foreach ($Exe in $SuspiciousExes) {
+                $Found = Get-ChildItem -Path $SearchPath -Recurse -Filter $Exe -ErrorAction SilentlyContinue | 
+                         Select-Object -First 5
+                
+                foreach ($File in $Found) {
+                    # Check if already found
+                    if ($FoundTools.Location -notcontains $File.DirectoryName) {
+                        $ToolCategory = "Unknown"
+                        foreach ($ToolName in $HackingTools.Keys) {
+                            foreach ($SearchTerm in $HackingTools[$ToolName]) {
+                                if ($File.Name -like "*$SearchTerm*" -or $File.DirectoryName -like "*$SearchTerm*") {
+                                    $ToolCategory = $ToolName
+                                    break
+                                }
+                            }
+                        }
+                        
+                        $FoundTools += [PSCustomObject]@{
+                            ToolCategory = $ToolCategory
+                            Name = $File.Name
+                            Version = "N/A"
+                            Location = $File.FullName
+                            UninstallString = $null
+                            DetectionMethod = "File System"
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    # Method 3: Check Windows Features for hacking-related components
+    Write-Info "Checking Windows Features..."
+    
+    $SuspiciousFeatures = @(
+        "TelnetClient",
+        "TFTP",
+        "SMB1Protocol",
+        "SMB1Protocol-Client",
+        "SMB1Protocol-Server"
+    )
+    
+    foreach ($Feature in $SuspiciousFeatures) {
+        $FeatureStatus = Get-WindowsOptionalFeature -Online -FeatureName $Feature -ErrorAction SilentlyContinue
+        if ($FeatureStatus -and $FeatureStatus.State -eq "Enabled") {
+            $FoundTools += [PSCustomObject]@{
+                ToolCategory = "Windows Feature"
+                Name = $Feature
+                Version = "Built-in"
+                Location = "Windows Feature"
+                UninstallString = "Disable-WindowsOptionalFeature -Online -FeatureName $Feature"
+                DetectionMethod = "Windows Feature"
+            }
+        }
+    }
+    
+    # Method 4: Check for suspicious PowerShell modules
+    Write-Info "Checking PowerShell modules..."
+    
+    $SuspiciousModules = @(
+        "PowerSploit", "Nishang", "Empire", "PowerShellMafia",
+        "Invoke-Mimikatz", "Invoke-ReflectivePEInjection",
+        "PowerView", "PowerUp", "Get-GPPPassword"
+    )
+    
+    $InstalledModules = Get-Module -ListAvailable -ErrorAction SilentlyContinue
+    
+    foreach ($Module in $SuspiciousModules) {
+        $Found = $InstalledModules | Where-Object { $_.Name -like "*$Module*" }
+        if ($Found) {
+            foreach ($M in $Found) {
+                $FoundTools += [PSCustomObject]@{
+                    ToolCategory = "PowerShell Module"
+                    Name = $M.Name
+                    Version = $M.Version
+                    Location = $M.ModuleBase
+                    UninstallString = "Uninstall-Module -Name $($M.Name)"
+                    DetectionMethod = "PowerShell Module"
+                }
+            }
+        }
+    }
+    
+    # Method 5: Check running processes for suspicious tools
+    Write-Info "Checking running processes..."
+    
+    $SuspiciousProcesses = @(
+        "nmap", "zenmap", "masscan",
+        "wireshark", "tshark", "dumpcap",
+        "hashcat", "john",
+        "msfconsole", "msfvenom",
+        "nc", "ncat", "netcat",
+        "mimikatz", "procdump",
+        "burp", "nikto",
+        "responder", "bettercap", "ettercap"
+    )
+    
+    $RunningProcesses = Get-Process -ErrorAction SilentlyContinue
+    
+    foreach ($ProcName in $SuspiciousProcesses) {
+        $Found = $RunningProcesses | Where-Object { $_.ProcessName -like "*$ProcName*" }
+        if ($Found) {
+            foreach ($Proc in $Found) {
+                Write-Issue "Suspicious process running: $($Proc.ProcessName) (PID: $($Proc.Id))" -Category "Hacking Tools" -Severity "Critical"
+            }
+        }
+    }
+    
+    # Method 6: Check for Python hacking tools
+    Write-Info "Checking for Python-based tools..."
+    
+    $PythonPaths = @(
+        "$env:LOCALAPPDATA\Programs\Python",
+        "$env:ProgramFiles\Python*",
+        "${env:ProgramFiles(x86)}\Python*"
+    )
+    
+    $PythonTools = @("sqlmap", "impacket", "crackmapexec", "bloodhound", "responder", "bettercap")
+    
+    # Check pip installed packages if Python exists
+    $PythonExe = Get-Command python -ErrorAction SilentlyContinue
+    if ($PythonExe) {
+        try {
+            $PipList = & python -m pip list 2>$null
+            foreach ($Tool in $PythonTools) {
+                if ($PipList -match $Tool) {
+                    $FoundTools += [PSCustomObject]@{
+                        ToolCategory = "Python Package"
+                        Name = $Tool
+                        Version = "Installed via pip"
+                        Location = "Python pip"
+                        UninstallString = "pip uninstall $Tool"
+                        DetectionMethod = "Python pip"
+                    }
+                }
+            }
+        }
+        catch {
+            # Python not properly configured
+        }
+    }
+    
+    # Display Results
+    Write-SubSection "Scan Results"
+    
+    if ($FoundTools.Count -eq 0) {
+        Write-Ok "No potentially dangerous tools detected"
+    }
+    else {
+        Write-Issue "$($FoundTools.Count) potentially dangerous tool(s) detected" -Category "Hacking Tools" -Severity "High"
+        Write-Host ""
+        
+        # Group by category
+        $GroupedTools = $FoundTools | Group-Object -Property ToolCategory
+        
+        foreach ($Group in $GroupedTools) {
+            Write-Host "  Category: $($Group.Name)" -ForegroundColor Yellow
+            foreach ($Tool in $Group.Group) {
+                Write-Host "    - $($Tool.Name)" -ForegroundColor Red
+                Write-Host "      Location: $($Tool.Location)" -ForegroundColor Gray
+                Write-Host "      Detection: $($Tool.DetectionMethod)" -ForegroundColor Gray
+            }
+            Write-Host ""
+        }
+        
+        # Offer removal options
+        Write-SubSection "Removal Options"
+        
+        foreach ($Tool in $FoundTools) {
+            if ($Tool.UninstallString -and $Tool.DetectionMethod -eq "Registry") {
+                if (Confirm-Action "Remove '$($Tool.Name)'?") {
+                    try {
+                        Write-Info "Attempting to uninstall $($Tool.Name)..."
+                        
+                        # Try to run uninstaller
+                        if ($Tool.UninstallString -match "msiexec") {
+                            $UninstallArgs = $Tool.UninstallString -replace "msiexec.exe", "" -replace "/I", "/X"
+                            Start-Process "msiexec.exe" -ArgumentList "$UninstallArgs /quiet /norestart" -Wait -ErrorAction Stop
+                        }
+                        else {
+                            Start-Process cmd -ArgumentList "/c `"$($Tool.UninstallString)`" /S /quiet" -Wait -ErrorAction Stop
+                        }
+                        
+                        Write-Fixed "Uninstalled $($Tool.Name)"
+                    }
+                    catch {
+                        Write-Warning2 "Automatic uninstall failed. Manual removal may be required."
+                        Write-Info "Uninstall command: $($Tool.UninstallString)"
+                    }
+                }
+            }
+            elseif ($Tool.DetectionMethod -eq "File System") {
+                if (Confirm-Action "Delete file '$($Tool.Location)'?") {
+                    try {
+                        Remove-Item -Path $Tool.Location -Force -ErrorAction Stop
+                        Write-Fixed "Deleted $($Tool.Location)"
+                    }
+                    catch {
+                        Write-Warning2 "Could not delete file: $($Tool.Location)"
+                    }
+                }
+            }
+            elseif ($Tool.DetectionMethod -eq "Windows Feature") {
+                if (Confirm-Action "Disable Windows Feature '$($Tool.Name)'?") {
+                    try {
+                        Disable-WindowsOptionalFeature -Online -FeatureName $Tool.Name -NoRestart -ErrorAction Stop
+                        Write-Fixed "Disabled Windows Feature: $($Tool.Name)"
+                    }
+                    catch {
+                        Write-Warning2 "Could not disable feature: $($Tool.Name)"
+                    }
+                }
+            }
+            elseif ($Tool.DetectionMethod -eq "PowerShell Module") {
+                if (Confirm-Action "Remove PowerShell module '$($Tool.Name)'?") {
+                    try {
+                        Uninstall-Module -Name $Tool.Name -Force -AllVersions -ErrorAction Stop
+                        Write-Fixed "Removed PowerShell module: $($Tool.Name)"
+                    }
+                    catch {
+                        Write-Warning2 "Could not remove module. Try: $($Tool.UninstallString)"
+                    }
+                }
+            }
+        }
+    }
+    
+    # Additional suspicious directory check
+    Write-SubSection "Checking for Suspicious Directories"
+    
+    $SuspiciousDirs = @(
+        "$env:SystemDrive\Tools",
+        "$env:SystemDrive\Hacking",
+        "$env:SystemDrive\Pentest",
+        "$env:SystemDrive\hack",
+        "$env:SystemDrive\exploits",
+        "$env:USERPROFILE\hacking",
+        "$env:USERPROFILE\tools",
+        "$env:USERPROFILE\pentest"
+    )
+    
+    foreach ($Dir in $SuspiciousDirs) {
+        if (Test-Path $Dir) {
+            Write-Warning2 "Suspicious directory found: $Dir"
+            $DirContents = Get-ChildItem -Path $Dir -ErrorAction SilentlyContinue | Select-Object -First 10
+            if ($DirContents) {
+                Write-Info "  Contents (first 10 items):"
+                foreach ($Item in $DirContents) {
+                    Write-Info "    - $($Item.Name)"
+                }
+            }
+            
+            if (Confirm-Action "Delete directory '$Dir' and all contents?") {
+                try {
+                    Remove-Item -Path $Dir -Recurse -Force -ErrorAction Stop
+                    Write-Fixed "Deleted directory: $Dir"
+                }
+                catch {
+                    Write-Warning2 "Could not delete directory: $Dir"
+                }
+            }
+        }
+    }
+}
+
+#===============================================================================
+# 8. WINDOWS SERVICES
+#===============================================================================
+
+function Set-ServiceConfiguration {
+    Write-Section "8. WINDOWS SERVICES (CIS 5)"
+    
+    Write-SubSection "Checking Potentially Dangerous Services"
+    
+    # Services that should be disabled per CIS benchmarks
+    $ServicesToDisable = @{
+        "Browser" = "Computer Browser"
+        "IISADMIN" = "IIS Admin Service"
+        "irmon" = "Infrared Monitor"
+        "SharedAccess" = "Internet Connection Sharing"
+        "LxssManager" = "Windows Subsystem for Linux"
+        "FTPSVC" = "FTP Publishing Service"
+        "RpcLocator" = "Remote Procedure Call Locator"
+        "RemoteRegistry" = "Remote Registry"
+        "RasAuto" = "Remote Access Auto Connection Manager"
+        "SessionEnv" = "Remote Desktop Configuration"
+        "TermService" = "Remote Desktop Services"
+        "UmRdpService" = "Remote Desktop Services UserMode Port Redirector"
+        "RpcSs" = "Remote Procedure Call (check if needed)"
+        "SNMP" = "SNMP Service"
+        "sacsvr" = "Special Administration Console Helper"
+        "SSDPSRV" = "SSDP Discovery"
+        "upnphost" = "UPnP Device Host"
+        "WMSvc" = "Web Management Service"
+        "WinRM" = "Windows Remote Management"
+        "W3SVC" = "World Wide Web Publishing Service"
+        "XboxGipSvc" = "Xbox Accessory Management Service"
+        "XblAuthManager" = "Xbox Live Auth Manager"
+        "XblGameSave" = "Xbox Live Game Save"
+        "XboxNetApiSvc" = "Xbox Live Networking Service"
+    }
+    
+    foreach ($ServiceName in $ServicesToDisable.Keys) {
+        $Service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        
+        if ($Service) {
+            if ($Service.Status -eq "Running") {
+                Write-Warning2 "Service '$($ServicesToDisable[$ServiceName])' ($ServiceName) is running"
+                
+                if (Confirm-Action "Stop and disable $ServiceName?") {
+                    Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+                    Set-Service -Name $ServiceName -StartupType Disabled -ErrorAction SilentlyContinue
+                    Write-Fixed "Stopped and disabled $ServiceName"
+                }
+            }
+            elseif ($Service.StartType -ne "Disabled") {
+                Write-Warning2 "Service '$ServiceName' is not disabled (StartType: $($Service.StartType))"
+            }
+        }
+    }
+    
+    Write-SubSection "Essential Security Services"
+    
+    # Services that should be running
+    $EssentialServices = @{
+        "EventLog" = "Windows Event Log"
+        "MpsSvc" = "Windows Defender Firewall"
+        "WinDefend" = "Windows Defender Antivirus"
+        "Sense" = "Windows Defender Advanced Threat Protection"
+    }
+    
+    foreach ($ServiceName in $EssentialServices.Keys) {
+        $Service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        
+        if ($Service) {
+            if ($Service.Status -ne "Running") {
+                Write-Issue "Essential service '$($EssentialServices[$ServiceName])' is not running" -Category "Services" -Severity "High"
+                if (Confirm-Action "Start $ServiceName?") {
+                    Set-Service -Name $ServiceName -StartupType Automatic -ErrorAction SilentlyContinue
+                    Start-Service -Name $ServiceName -ErrorAction SilentlyContinue
+                    Write-Fixed "Started $ServiceName"
+                }
+            }
+            else {
+                Write-Ok "$($EssentialServices[$ServiceName]) is running"
+            }
+        }
+    }
+}
+
+#===============================================================================
+# 9. WINDOWS DEFENDER
+#===============================================================================
+
+function Set-DefenderConfiguration {
+    Write-Section "9. WINDOWS DEFENDER CONFIGURATION"
+    
+    Write-SubSection "Checking Windows Defender Status"
+    
+    try {
+        $DefenderStatus = Get-MpComputerStatus -ErrorAction Stop
+        
+        # Real-time protection
+        if (!$DefenderStatus.RealTimeProtectionEnabled) {
+            Write-Issue "Real-time protection is disabled" -Category "Defender" -Severity "Critical"
+            if (Confirm-Action "Enable real-time protection?") {
+                Set-MpPreference -DisableRealtimeMonitoring $false
+                Write-Fixed "Enabled real-time protection"
+            }
+        }
+        else {
+            Write-Ok "Real-time protection is enabled"
+        }
+        
+        # Behavior monitoring
+        if (!$DefenderStatus.BehaviorMonitorEnabled) {
+            Write-Issue "Behavior monitoring is disabled" -Category "Defender" -Severity "High"
+            if (Confirm-Action "Enable behavior monitoring?") {
+                Set-MpPreference -DisableBehaviorMonitoring $false
+                Write-Fixed "Enabled behavior monitoring"
+            }
+        }
+        else {
+            Write-Ok "Behavior monitoring is enabled"
+        }
+        
+        # IOAV protection (scanning downloaded files)
+        if (!$DefenderStatus.IoavProtectionEnabled) {
+            Write-Issue "Download scanning (IOAV) is disabled" -Category "Defender" -Severity "High"
+            if (Confirm-Action "Enable download scanning?") {
+                Set-MpPreference -DisableIOAVProtection $false
+                Write-Fixed "Enabled download scanning"
+            }
+        }
+        else {
+            Write-Ok "Download scanning is enabled"
+        }
+        
+        # Signature age
+        $SignatureAge = (Get-Date) - $DefenderStatus.AntivirusSignatureLastUpdated
+        if ($SignatureAge.Days -gt 7) {
+            Write-Warning2 "Antivirus signatures are $($SignatureAge.Days) days old"
+        }
+        else {
+            Write-Ok "Antivirus signatures updated: $($DefenderStatus.AntivirusSignatureLastUpdated)"
+        }
+        
+        # Cloud protection
+        $CloudProtection = (Get-MpPreference).MAPSReporting
+        if ($CloudProtection -eq 0) {
+            Write-Warning2 "Cloud-delivered protection is disabled"
+        }
+        else {
+            Write-Ok "Cloud-delivered protection is enabled"
+        }
+        
+        # PUA Protection
+        $PUAProtection = (Get-MpPreference).PUAProtection
+        if ($PUAProtection -ne 1) {
+            Write-Warning2 "Potentially Unwanted Application protection is not enabled"
+            if (Confirm-Action "Enable PUA protection?") {
+                Set-MpPreference -PUAProtection Enabled
+                Write-Fixed "Enabled PUA protection"
+            }
+        }
+        else {
+            Write-Ok "PUA protection is enabled"
+        }
+    }
+    catch {
+        Write-Warning2 "Unable to query Windows Defender status - may not be installed"
+    }
+}
+
+#===============================================================================
+# 10. SMB CONFIGURATION
+#===============================================================================
+
+function Set-SMBConfiguration {
+    Write-Section "10. SMB SECURITY CONFIGURATION"
+    
+    Write-SubSection "SMB Protocol Settings"
+    
+    # Disable SMBv1 (CIS 18.3.2)
+    $SMBv1Server = Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -ErrorAction SilentlyContinue
+    if ($SMBv1Server.State -eq "Enabled") {
+        Write-Issue "SMBv1 is enabled (vulnerable to EternalBlue/WannaCry)" -Category "SMB" -Severity "Critical"
+        if (Confirm-Action "Disable SMBv1?") {
+            Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart
+            Write-Fixed "Disabled SMBv1 (restart required)"
+        }
+    }
+    else {
+        Write-Ok "SMBv1 is disabled"
+    }
+    
+    # Check SMBv1 client
+    $SMBv1Client = Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol-Client -ErrorAction SilentlyContinue
+    if ($SMBv1Client -and $SMBv1Client.State -eq "Enabled") {
+        Write-Warning2 "SMBv1 Client is enabled"
+    }
+    
+    # SMB Signing (CIS 2.3.9.1, 2.3.9.2)
+    $SMBServerConfig = Get-SmbServerConfiguration
+    
+    if (!$SMBServerConfig.RequireSecuritySignature) {
+        Write-Issue "SMB Server signing is not required" -Category "SMB" -Severity "High"
+        if (Confirm-Action "Require SMB server signing?") {
+            Set-SmbServerConfiguration -RequireSecuritySignature $true -Force
+            Write-Fixed "Enabled SMB server signing requirement"
+        }
+    }
+    else {
+        Write-Ok "SMB server signing is required"
+    }
+    
+    if (!$SMBServerConfig.EnableSecuritySignature) {
+        Write-Warning2 "SMB Server signing is not enabled"
+        if (Confirm-Action "Enable SMB server signing?") {
+            Set-SmbServerConfiguration -EnableSecuritySignature $true -Force
+            Write-Fixed "Enabled SMB server signing"
+        }
+    }
+    else {
+        Write-Ok "SMB server signing is enabled"
+    }
+    
+    # SMB Encryption
+    if (!$SMBServerConfig.EncryptData) {
+        Write-Warning2 "SMB encryption is not enabled (optional but recommended)"
+    }
+    else {
+        Write-Ok "SMB encryption is enabled"
+    }
+    
+    Write-SubSection "Administrative Shares"
+    
+    # List administrative shares
+    $Shares = Get-SmbShare | Where-Object { $_.Name -like "*$" }
+    foreach ($Share in $Shares) {
+        Write-Info "Administrative share: $($Share.Name) -> $($Share.Path)"
+    }
+}
+
+#===============================================================================
+# 11. REMOTE DESKTOP CONFIGURATION
+#===============================================================================
+
+function Set-RDPConfiguration {
+    Write-Section "11. REMOTE DESKTOP CONFIGURATION (CIS 18.9.65)"
+    
+    Write-SubSection "RDP Security Settings"
+    
+    $RegPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"
+    
+    # Check if RDP is enabled
+    $RDPEnabled = Get-RegistryValue -Path $RegPath -Name "fDenyTSConnections"
+    
+    if ($RDPEnabled -eq 0) {
+        Write-Info "Remote Desktop is enabled"
+        
+        # NLA requirement (CIS 18.9.65.3.9.2)
+        $RegPath2 = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+        $NLA = Get-RegistryValue -Path $RegPath2 -Name "UserAuthentication"
+        
+        if ($NLA -ne 1) {
+            Write-Issue "Network Level Authentication (NLA) is not required" -Category "RDP" -Severity "High"
+            if (Confirm-Action "Enable NLA for RDP?") {
+                Backup-RegistryKey "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+                Set-RegistryValue -Path $RegPath2 -Name "UserAuthentication" -Value 1
+                Write-Fixed "Enabled NLA for RDP"
+            }
+        }
+        else {
+            Write-Ok "NLA is required for RDP"
+        }
+        
+        # Security Layer (CIS 18.9.65.3.9.1 - should be SSL)
+        $SecurityLayer = Get-RegistryValue -Path $RegPath2 -Name "SecurityLayer"
+        if ($SecurityLayer -lt 2) {
+            Write-Warning2 "RDP security layer is not set to SSL (TLS 1.0)"
+            if (Confirm-Action "Set RDP to use SSL?") {
+                Set-RegistryValue -Path $RegPath2 -Name "SecurityLayer" -Value 2
+                Write-Fixed "Set RDP security layer to SSL"
+            }
+        }
+        else {
+            Write-Ok "RDP using SSL security layer"
+        }
+        
+        # Encryption level (CIS 18.9.65.3.9.3)
+        $EncryptionLevel = Get-RegistryValue -Path $RegPath2 -Name "MinEncryptionLevel"
+        if ($EncryptionLevel -lt 3) {
+            Write-Warning2 "RDP encryption level is not set to High"
+            if (Confirm-Action "Set RDP encryption to High?") {
+                Set-RegistryValue -Path $RegPath2 -Name "MinEncryptionLevel" -Value 3
+                Write-Fixed "Set RDP encryption to High"
+            }
+        }
+        else {
+            Write-Ok "RDP encryption level is High"
+        }
+        
+        # Session timeout settings
+        Write-SubSection "RDP Session Timeout Settings"
+        
+        $RegPath3 = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+        
+        # Idle session limit
+        $IdleLimit = Get-RegistryValue -Path $RegPath3 -Name "MaxIdleTime"
+        if ($null -eq $IdleLimit -or $IdleLimit -eq 0) {
+            Write-Warning2 "RDP idle session timeout is not configured"
+        }
+        else {
+            Write-Ok "RDP idle timeout: $([math]::Round($IdleLimit/60000)) minutes"
+        }
+    }
+    else {
+        Write-Ok "Remote Desktop is disabled"
+    }
+}
+
+#===============================================================================
+# 12. TLS/SSL CONFIGURATION
+#===============================================================================
+
+function Set-TLSConfiguration {
+    Write-Section "12. TLS/SSL CONFIGURATION"
+    
+    Write-SubSection "Checking Protocol Status"
+    
+    $ProtocolPath = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols"
+    
+    # Protocols to disable
+    $DisableProtocols = @("SSL 2.0", "SSL 3.0", "TLS 1.0", "TLS 1.1")
+    
+    foreach ($Protocol in $DisableProtocols) {
+        $ServerPath = "$ProtocolPath\$Protocol\Server"
+        $ClientPath = "$ProtocolPath\$Protocol\Client"
+        
+        $ServerEnabled = Get-RegistryValue -Path $ServerPath -Name "Enabled"
+        $ClientEnabled = Get-RegistryValue -Path $ClientPath -Name "Enabled"
+        
+        if ($ServerEnabled -ne 0 -or $ClientEnabled -ne 0) {
+            if ($null -eq $ServerEnabled -and $null -eq $ClientEnabled) {
+                # Protocol may be enabled by default
+                Write-Warning2 "$Protocol may be enabled (not explicitly disabled)"
+            }
+            else {
+                Write-Issue "$Protocol is enabled" -Category "TLS" -Severity "High"
+            }
+            
+            if (Confirm-Action "Disable $Protocol?") {
+                # Disable Server
+                if (!(Test-Path $ServerPath)) { New-Item -Path $ServerPath -Force | Out-Null }
+                Set-RegistryValue -Path $ServerPath -Name "Enabled" -Value 0
+                Set-RegistryValue -Path $ServerPath -Name "DisabledByDefault" -Value 1
+                
+                # Disable Client
+                if (!(Test-Path $ClientPath)) { New-Item -Path $ClientPath -Force | Out-Null }
+                Set-RegistryValue -Path $ClientPath -Name "Enabled" -Value 0
+                Set-RegistryValue -Path $ClientPath -Name "DisabledByDefault" -Value 1
+                
+                Write-Fixed "Disabled $Protocol"
+            }
+        }
+        else {
+            Write-Ok "$Protocol is disabled"
+        }
+    }
+    
+    # Ensure TLS 1.2 is enabled
+    Write-SubSection "Ensuring TLS 1.2 and 1.3 are enabled"
+    
+    $EnableProtocols = @("TLS 1.2", "TLS 1.3")
+    
+    foreach ($Protocol in $EnableProtocols) {
+        $ServerPath = "$ProtocolPath\$Protocol\Server"
+        $ClientPath = "$ProtocolPath\$Protocol\Client"
+        
+        $ServerEnabled = Get-RegistryValue -Path $ServerPath -Name "Enabled"
+        
+        if ($ServerEnabled -eq 0) {
+            Write-Issue "$Protocol is disabled" -Category "TLS" -Severity "High"
+            if (Confirm-Action "Enable $Protocol?") {
+                if (!(Test-Path $ServerPath)) { New-Item -Path $ServerPath -Force | Out-Null }
+                Set-RegistryValue -Path $ServerPath -Name "Enabled" -Value 1
+                Set-RegistryValue -Path $ServerPath -Name "DisabledByDefault" -Value 0
+                
+                if (!(Test-Path $ClientPath)) { New-Item -Path $ClientPath -Force | Out-Null }
+                Set-RegistryValue -Path $ClientPath -Name "Enabled" -Value 1
+                Set-RegistryValue -Path $ClientPath -Name "DisabledByDefault" -Value 0
+                
+                Write-Fixed "Enabled $Protocol"
+            }
+        }
+        else {
+            Write-Ok "$Protocol is enabled"
+        }
+    }
+}
+
+#===============================================================================
+# 13. WINDOWS UPDATE CONFIGURATION
+#===============================================================================
+
+function Set-WindowsUpdateConfiguration {
+    Write-Section "13. WINDOWS UPDATE CONFIGURATION (CIS 18.9.102)"
+    
+    Write-SubSection "Checking Windows Update Settings"
+    
+    $RegPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
+    
+    # Check if auto-update is enabled
+    $AutoUpdate = Get-RegistryValue -Path $RegPath -Name "NoAutoUpdate"
+    if ($AutoUpdate -eq 1) {
+        Write-Issue "Automatic updates are disabled" -Category "Updates" -Severity "High"
+    }
+    else {
+        Write-Ok "Automatic updates are enabled"
+    }
+    
+    # Check update settings
+    try {
+        $UpdateSession = New-Object -ComObject Microsoft.Update.Session
+        $UpdateSearcher = $UpdateSession.CreateUpdateSearcher()
+        $PendingUpdates = $UpdateSearcher.Search("IsInstalled=0").Updates.Count
+        
+        if ($PendingUpdates -gt 0) {
+            Write-Warning2 "$PendingUpdates pending updates available"
+        }
+        else {
+            Write-Ok "System is up to date"
+        }
+        
+        # Last update check
+        $AutoUpdate = New-Object -ComObject Microsoft.Update.AutoUpdate
+        Write-Info "Last update search: $($AutoUpdate.Results.LastSearchSuccessDate)"
+    }
+    catch {
+        Write-Warning2 "Unable to query Windows Update status"
+    }
+    
+    # Check WSUS configuration
+    $WUServer = Get-RegistryValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -Name "WUServer"
+    if ($WUServer) {
+        Write-Info "WSUS Server configured: $WUServer"
+    }
+}
+
+#===============================================================================
+# 14. ADDITIONAL SECURITY SETTINGS
+#===============================================================================
+
+function Set-AdditionalSecuritySettings {
+    Write-Section "14. ADDITIONAL SECURITY SETTINGS"
+    
+    Write-SubSection "PowerShell Security"
+    
+    # PowerShell script execution policy
+    $ExecutionPolicy = Get-ExecutionPolicy
+    Write-Info "PowerShell Execution Policy: $ExecutionPolicy"
+    
+    # PowerShell logging (CIS 18.9.100)
+    $PSLogging = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging"
+    $ScriptBlockLogging = Get-RegistryValue -Path $PSLogging -Name "EnableScriptBlockLogging"
+    
+    if ($ScriptBlockLogging -ne 1) {
+        Write-Warning2 "PowerShell Script Block Logging is not enabled"
+        if (Confirm-Action "Enable PowerShell Script Block Logging?") {
+            if (!(Test-Path $PSLogging)) { New-Item -Path $PSLogging -Force | Out-Null }
+            Set-RegistryValue -Path $PSLogging -Name "EnableScriptBlockLogging" -Value 1
+            Write-Fixed "Enabled PowerShell Script Block Logging"
+        }
+    }
+    else {
+        Write-Ok "PowerShell Script Block Logging is enabled"
+    }
+    
+    # Module Logging
+    $PSModuleLogging = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging"
+    $ModuleLogging = Get-RegistryValue -Path $PSModuleLogging -Name "EnableModuleLogging"
+    
+    if ($ModuleLogging -ne 1) {
+        Write-Warning2 "PowerShell Module Logging is not enabled"
+        if (Confirm-Action "Enable PowerShell Module Logging?") {
+            if (!(Test-Path $PSModuleLogging)) { New-Item -Path $PSModuleLogging -Force | Out-Null }
+            Set-RegistryValue -Path $PSModuleLogging -Name "EnableModuleLogging" -Value 1
+            Write-Fixed "Enabled PowerShell Module Logging"
+        }
+    }
+    else {
+        Write-Ok "PowerShell Module Logging is enabled"
+    }
+    
+    Write-SubSection "AutoPlay/AutoRun"
+    
+    # Disable AutoPlay (CIS 18.9.8)
+    $AutoPlayPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer"
+    $NoDriveTypeAutoRun = Get-RegistryValue -Path $AutoPlayPath -Name "NoDriveTypeAutoRun"
+    
+    if ($NoDriveTypeAutoRun -ne 255) {
+        Write-Issue "AutoRun is not disabled for all drives" -Category "Security" -Severity "Medium"
+        if (Confirm-Action "Disable AutoRun for all drives?") {
+            Set-RegistryValue -Path $AutoPlayPath -Name "NoDriveTypeAutoRun" -Value 255
+            Write-Fixed "Disabled AutoRun for all drives"
+        }
+    }
+    else {
+        Write-Ok "AutoRun is disabled for all drives"
+    }
+    
+    Write-SubSection "Windows Error Reporting"
+    
+    # Check WER settings
+    $WERPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting"
+    $WERDisabled = Get-RegistryValue -Path $WERPath -Name "Disabled"
+    Write-Info "Windows Error Reporting: $(if($WERDisabled -eq 1){'Disabled'}else{'Enabled'})"
+    
+    Write-SubSection "Credential Guard / LSA Protection"
+    
+    # LSA Protection (CIS 18.3.1)
+    $LSAPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
+    $RunAsPPL = Get-RegistryValue -Path $LSAPath -Name "RunAsPPL"
+    
+    if ($RunAsPPL -ne 1) {
+        Write-Warning2 "LSA Protection (RunAsPPL) is not enabled"
+        if (Confirm-Action "Enable LSA Protection?") {
+            Set-RegistryValue -Path $LSAPath -Name "RunAsPPL" -Value 1
+            Write-Fixed "Enabled LSA Protection (requires restart)"
+        }
+    }
+    else {
+        Write-Ok "LSA Protection is enabled"
+    }
+    
+    # Credential Guard
+    $DevGuardPath = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard"
+    $CredGuard = Get-RegistryValue -Path $DevGuardPath -Name "EnableVirtualizationBasedSecurity"
+    
+    if ($CredGuard -eq 1) {
+        Write-Ok "Virtualization Based Security is enabled"
+    }
+    else {
+        Write-Warning2 "Virtualization Based Security is not enabled (requires compatible hardware)"
+    }
+    
+    Write-SubSection "LSASS Memory Protection"
+    
+    # WDigest (CIS 18.3.7) - Should be disabled
+    $WDigestPath = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest"
+    $UseLogonCredential = Get-RegistryValue -Path $WDigestPath -Name "UseLogonCredential"
+    
+    if ($UseLogonCredential -ne 0) {
+        Write-Issue "WDigest credential caching is enabled (passwords in memory)" -Category "Security" -Severity "High"
+        if (Confirm-Action "Disable WDigest credential caching?") {
+            if (!(Test-Path $WDigestPath)) { New-Item -Path $WDigestPath -Force | Out-Null }
+            Set-RegistryValue -Path $WDigestPath -Name "UseLogonCredential" -Value 0
+            Write-Fixed "Disabled WDigest credential caching"
+        }
+    }
+    else {
+        Write-Ok "WDigest credential caching is disabled"
+    }
+}
+
+#===============================================================================
+# 15. IIS CONFIGURATION (IF INSTALLED)
+#===============================================================================
+
+function Set-IISConfiguration {
+    Write-Section "15. IIS CONFIGURATION"
+    
+    # Check if IIS is installed
+    $IISInstalled = Get-WindowsFeature -Name Web-Server -ErrorAction SilentlyContinue
+    
+    if ($IISInstalled -and $IISInstalled.Installed) {
+        Write-Info "IIS is installed"
+        
+        Import-Module WebAdministration -ErrorAction SilentlyContinue
+        
+        Write-SubSection "IIS Security Settings"
+        
+        # Directory Browsing
+        $DirBrowsing = Get-WebConfigurationProperty -Filter /system.webServer/directoryBrowse -Name enabled -PSPath 'IIS:\' -ErrorAction SilentlyContinue
+        if ($DirBrowsing.Value -eq $true) {
+            Write-Issue "IIS Directory Browsing is enabled globally" -Category "IIS" -Severity "Medium"
+        }
+        else {
+            Write-Ok "IIS Directory Browsing is disabled"
+        }
+        
+        # List application pools
+        Write-SubSection "Application Pool Identities"
+        
+        $AppPools = Get-ChildItem IIS:\AppPools -ErrorAction SilentlyContinue
+        foreach ($Pool in $AppPools) {
+            $Identity = $Pool.processModel.identityType
+            if ($Identity -eq "LocalSystem") {
+                Write-Issue "App Pool '$($Pool.Name)' runs as LocalSystem" -Category "IIS" -Severity "High"
+            }
+            else {
+                Write-Info "App Pool '$($Pool.Name)' identity: $Identity"
+            }
+        }
+        
+        # HTTPS binding check
+        Write-SubSection "HTTPS Configuration"
+        
+        $Sites = Get-ChildItem IIS:\Sites -ErrorAction SilentlyContinue
+        foreach ($Site in $Sites) {
+            $HttpsBindings = $Site.Bindings.Collection | Where-Object { $_.protocol -eq "https" }
+            $HttpBindings = $Site.Bindings.Collection | Where-Object { $_.protocol -eq "http" }
+            
+            if ($HttpBindings -and !$HttpsBindings) {
+                Write-Warning2 "Site '$($Site.Name)' only has HTTP bindings"
+            }
+            elseif ($HttpsBindings) {
+                Write-Ok "Site '$($Site.Name)' has HTTPS binding"
+            }
+        }
+    }
+    else {
+        Write-Info "IIS is not installed"
+    }
+}
+
+#===============================================================================
+# 16. LOCAL USERS AND GROUPS
+#===============================================================================
+
+function Check-LocalUsersAndGroups {
+    Write-Section "16. LOCAL USERS AND GROUPS AUDIT"
+    
+    Write-SubSection "Local User Accounts"
+    
+    $LocalUsers = Get-LocalUser
+    
+    foreach ($User in $LocalUsers) {
+        $Status = if ($User.Enabled) { "Enabled" } else { "Disabled" }
+        $LastLogon = if ($User.LastLogon) { $User.LastLogon } else { "Never" }
+        
+        Write-Info "User: $($User.Name) | Status: $Status | Last Logon: $LastLogon"
+        
+        # Check for users that never expire
+        if ($User.PasswordNeverExpires -and $User.Enabled) {
+            Write-Warning2 "User '$($User.Name)' has password set to never expire"
+        }
+        
+        # Check for users with no password required
+        if ($User.PasswordRequired -eq $false -and $User.Enabled) {
+            Write-Issue "User '$($User.Name)' does not require a password" -Category "Users" -Severity "High"
+        }
+    }
+    
+    Write-SubSection "Administrators Group Members"
+    
+    $AdminGroup = Get-LocalGroupMember -Group "Administrators" -ErrorAction SilentlyContinue
+    Write-Info "Members of Administrators group:"
+    foreach ($Member in $AdminGroup) {
+        Write-Info "  - $($Member.Name) ($($Member.ObjectClass))"
+    }
+    
+    if ($AdminGroup.Count -gt 3) {
+        Write-Warning2 "Administrators group has $($AdminGroup.Count) members (review for least privilege)"
+    }
+    
+    Write-SubSection "Remote Desktop Users"
+    
+    $RDPUsers = Get-LocalGroupMember -Group "Remote Desktop Users" -ErrorAction SilentlyContinue
+    if ($RDPUsers) {
+        Write-Info "Members of Remote Desktop Users group:"
+        foreach ($Member in $RDPUsers) {
+            Write-Info "  - $($Member.Name)"
+        }
+    }
+    else {
+        Write-Info "No members in Remote Desktop Users group"
+    }
+}
+
+#===============================================================================
+# 17. NETWORK CONFIGURATION
+#===============================================================================
+
+function Check-NetworkConfiguration {
+    Write-Section "17. NETWORK CONFIGURATION"
+    
+    Write-SubSection "Network Adapters"
+    
+    $Adapters = Get-NetAdapter | Where-Object { $_.Status -eq "Up" }
+    foreach ($Adapter in $Adapters) {
+        Write-Info "Adapter: $($Adapter.Name) - $($Adapter.InterfaceDescription)"
+        
+        $IPConfig = Get-NetIPConfiguration -InterfaceIndex $Adapter.ifIndex
+        Write-Info "  IPv4: $($IPConfig.IPv4Address.IPAddress)"
+        Write-Info "  Gateway: $($IPConfig.IPv4DefaultGateway.NextHop)"
+    }
+    
+    Write-SubSection "DNS Configuration"
+    
+    $DNSServers = Get-DnsClientServerAddress | Where-Object { $_.AddressFamily -eq 2 -and $_.ServerAddresses }
+    foreach ($DNS in $DNSServers) {
+        Write-Info "Interface '$($DNS.InterfaceAlias)' DNS: $($DNS.ServerAddresses -join ', ')"
+    }
+    
+    Write-SubSection "Listening Ports"
+    
+    Write-Info "TCP Listening Ports:"
+    $TCPPorts = Get-NetTCPConnection -State Listen | 
+                Select-Object LocalAddress, LocalPort, OwningProcess | 
+                Sort-Object LocalPort -Unique | 
+                Select-Object -First 20
+    
+    foreach ($Port in $TCPPorts) {
+        $Process = Get-Process -Id $Port.OwningProcess -ErrorAction SilentlyContinue
+        Write-Info "  Port $($Port.LocalPort) - $($Process.ProcessName) (PID: $($Port.OwningProcess))"
+    }
+    
+    Write-SubSection "IPv6 Status"
+    
+    $IPv6 = Get-NetAdapterBinding -ComponentID ms_tcpip6 | Where-Object { $_.Enabled -eq $true }
+    if ($IPv6) {
+        Write-Warning2 "IPv6 is enabled on: $($IPv6.Name -join ', ') (disable if not needed)"
+    }
+    else {
+        Write-Ok "IPv6 is disabled on all adapters"
+    }
+    
+    Write-SubSection "LLMNR Configuration"
+    
+    $LLMNRPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient"
+    $LLMNR = Get-RegistryValue -Path $LLMNRPath -Name "EnableMulticast"
+    
+    if ($LLMNR -ne 0) {
+        Write-Warning2 "LLMNR is not disabled (potential for poisoning attacks)"
+        if (Confirm-Action "Disable LLMNR?") {
+            if (!(Test-Path $LLMNRPath)) { New-Item -Path $LLMNRPath -Force | Out-Null }
+            Set-RegistryValue -Path $LLMNRPath -Name "EnableMulticast" -Value 0
+            Write-Fixed "Disabled LLMNR"
+        }
+    }
+    else {
+        Write-Ok "LLMNR is disabled"
+    }
+}
+
+#===============================================================================
+# REPORTING
+#===============================================================================
+
+function Generate-HTMLReport {
+    if (!$GenerateReport) { return }
+    
+    Write-Section "GENERATING HTML REPORT"
+    
+    $HTML = @"
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Windows Server 2022 Security Hardening Report</title>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { color: #0078d4; border-bottom: 3px solid #0078d4; padding-bottom: 10px; }
+        h2 { color: #333; margin-top: 30px; }
+        .summary { display: flex; gap: 20px; margin: 20px 0; }
+        .summary-box { flex: 1; padding: 20px; border-radius: 8px; text-align: center; }
+        .issues { background: #fde7e9; border-left: 4px solid #e81123; }
+        .fixed { background: #dff6dd; border-left: 4px solid #107c10; }
+        .warnings { background: #fff4ce; border-left: 4px solid #ff8c00; }
+        .summary-box h3 { margin: 0; font-size: 36px; }
+        .summary-box p { margin: 5px 0 0 0; color: #666; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background-color: #0078d4; color: white; }
+        tr:hover { background-color: #f5f5f5; }
+        .severity-Critical { color: #e81123; font-weight: bold; }
+        .severity-High { color: #ff8c00; font-weight: bold; }
+        .severity-Medium { color: #ffc83d; }
+        .severity-Low { color: #107c10; }
+        .timestamp { color: #666; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🛡️ Windows Server 2022 Security Hardening Report</h1>
+        <p class="timestamp">Generated: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss") | Server: $env:COMPUTERNAME</p>
+        
+        <div class="summary">
+            <div class="summary-box issues">
+                <h3>$Script:IssuesFound</h3>
+                <p>Issues Found</p>
+            </div>
+            <div class="summary-box fixed">
+                <h3>$Script:IssuesFixed</h3>
+                <p>Issues Fixed</p>
+            </div>
+            <div class="summary-box warnings">
+                <h3>$Script:Warnings</h3>
+                <p>Warnings</p>
+            </div>
+        </div>
+        
+        <h2>📋 Detailed Findings</h2>
+        <table>
+            <tr>
+                <th>Category</th>
+                <th>Severity</th>
+                <th>Finding</th>
+                <th>Status</th>
+            </tr>
+"@
+
+    foreach ($Finding in $Script:Findings) {
+        $HTML += @"
+            <tr>
+                <td>$($Finding.Category)</td>
+                <td class="severity-$($Finding.Severity)">$($Finding.Severity)</td>
+                <td>$($Finding.Finding)</td>
+                <td>$($Finding.Status)</td>
+            </tr>
+"@
+    }
+
+    $HTML += @"
+        </table>
+        
+        <h2>📁 Output Files</h2>
+        <ul>
+            <li>Log File: $Script:LogFile</li>
+            <li>Backup Directory: $Script:BackupDir</li>
+            <li>Report File: $Script:ReportFile</li>
+        </ul>
+        
+        <h2>📚 References</h2>
+        <ul>
+            <li><a href="https://www.cisecurity.org/benchmark/microsoft_windows_server">CIS Microsoft Windows Server 2022 Benchmark</a></li>
+            <li><a href="https://docs.microsoft.com/en-us/windows/security/threat-protection/windows-security-baselines">Microsoft Security Baselines</a></li>
+            <li><a href="https://public.cyber.mil/stigs/">DISA STIGs</a></li>
+        </ul>
+    </div>
+</body>
+</html>
+"@
+
+    $HTML | Out-File -FilePath $Script:ReportFile -Encoding UTF8
+    Write-Ok "HTML report generated: $Script:ReportFile"
+}
+
+#===============================================================================
+# SUMMARY
+#===============================================================================
+
+function Show-Summary {
+    Write-Section "SECURITY HARDENING SUMMARY"
+    
+    Write-Host ""
+    Write-Host "Results:" -ForegroundColor White
+    Write-Host "  Issues Found:  " -NoNewline; Write-Host "$Script:IssuesFound" -ForegroundColor Red
+    Write-Host "  Issues Fixed:  " -NoNewline; Write-Host "$Script:IssuesFixed" -ForegroundColor Green
+    Write-Host "  Warnings:      " -NoNewline; Write-Host "$Script:Warnings" -ForegroundColor Yellow
+    Write-Host ""
+    
+    if ($Mode -eq "CheckOnly") {
+        Write-Host "Note: Running in CHECK-ONLY mode. No changes were made." -ForegroundColor Yellow
+        Write-Host "Run with -Mode Interactive or -Mode AutoFix to apply fixes." -ForegroundColor Yellow
+    }
+    
+    Write-Host ""
+    Write-Host "Output Files:" -ForegroundColor White
+    Write-Host "  Log File:      $Script:LogFile" -ForegroundColor Cyan
+    Write-Host "  Backup Dir:    $Script:BackupDir" -ForegroundColor Cyan
+    
+    if ($GenerateReport) {
+        Write-Host "  HTML Report:   $Script:ReportFile" -ForegroundColor Cyan
+    }
+    
+    Write-Host ""
+    Write-Host "Recommended Next Steps:" -ForegroundColor White
+    Write-Host "  1. Review the log file for detailed findings"
+    Write-Host "  2. Apply Windows Updates"
+    Write-Host "  3. Review user accounts and group memberships"
+    Write-Host "  4. Review firewall rules"
+    Write-Host "  5. Consider implementing additional GPOs"
+    Write-Host "  6. Schedule regular security audits"
+    Write-Host ""
+    
+    if ($Script:IssuesFound -gt 0 -and $Script:IssuesFixed -lt $Script:IssuesFound) {
+        Write-Host "⚠️  Some issues remain unresolved. Review and address them." -ForegroundColor Yellow
+    }
+    elseif ($Script:IssuesFound -eq 0) {
+        Write-Host "✅ No critical issues found. System appears well-configured." -ForegroundColor Green
+    }
+    else {
+        Write-Host "✅ All identified issues have been addressed." -ForegroundColor Green
+    }
+}
+
+#===============================================================================
+# MAIN EXECUTION
+#===============================================================================
+
+function Main {
+    Write-Banner
+    
+    Write-Host "Script started at $(Get-Date)" -ForegroundColor Yellow
+    Write-Host "Mode: $Mode" -ForegroundColor Cyan
+    Write-Host ""
+    
+    Write-Log "Script started - Mode: $Mode"
+    
+    # Run all checks
+    Get-SystemInfo
+    Set-AccountPolicies
+    Set-UserRightsAssignment
+    Set-SecurityOptions
+    Set-FirewallConfiguration
+    Set-AuditPolicy
+    Check-HackingTools
+    Set-ServiceConfiguration
+    Set-DefenderConfiguration
+    Set-SMBConfiguration
+    Set-RDPConfiguration
+    Set-TLSConfiguration
+    Set-WindowsUpdateConfiguration
+    Set-AdditionalSecuritySettings
+    Set-IISConfiguration
+    Check-LocalUsersAndGroups
+    Check-NetworkConfiguration
+    
+    # Generate report if requested
+    Generate-HTMLReport
+    
+    # Show summary
+    Show-Summary
+    
+    Write-Log "Script completed"
+    
+    Write-Host ""
+    Write-Host "Security hardening script completed!" -ForegroundColor Green
+}
+
+# Execute
+Main
