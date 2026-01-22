@@ -1,0 +1,155 @@
+User & Access ManagementRemove Unauthorized Users
+
+Open Terminal (Ctrl+Alt+T)
+List all users: cat /etc/passwd | grep "/bin/bash"
+Compare with README authorized users list
+Remove unauthorized user: sudo deluser <username>
+Remove user home directory: sudo rm -rf /home/<username>
+Check for UID 0 Users (Root Privileges)
+
+In Terminal: awk -F: '$3 == 0 {print $1}' /etc/passwd
+Only "root" should appear
+If other users appear: sudo usermod -u <new_uid> <username>
+Disable Guest Account
+
+Open terminal
+Create/edit file: sudo nano /etc/lightdm/lightdm.conf
+Add under [Seat:*] section:
+
+   allow-guest=false
+
+Save (Ctrl+X, Y, Enter)
+Restart LightDM: sudo systemctl restart lightdm
+Set Password Policies
+
+Install password quality tools: sudo apt-get install libpam-pwquality
+Edit PAM config: sudo nano /etc/pam.d/common-password
+Find line with pam_pwquality.so and modify:
+
+   password requisite pam_pwquality.so retry=3 minlen=8 difok=3 ucredit=-1 lcredit=-1 dcredit=-1 ocredit=-1
+
+minlen=8 (minimum 8 characters)
+ucredit=-1 (require uppercase)
+lcredit=-1 (require lowercase)
+dcredit=-1 (require digit)
+ocredit=-1 (require special character)
+
+
+Save and exit
+Configure Password Aging
+
+Edit login.defs: sudo nano /etc/login.defs
+Set these values:
+
+   PASS_MAX_DAYS 90
+   PASS_MIN_DAYS 7
+   PASS_WARN_AGE 14
+
+Apply to existing users: sudo chage -M 90 -m 7 -W 14 <username>
+Check settings: sudo chage -l <username>
+Remove Unauthorized Sudo Users
+
+Check sudo group: grep sudo /etc/group
+Remove user from sudo: sudo deluser <username> sudo
+Check sudoers file: sudo visudo
+Check sudoers.d directory: ls -la /etc/sudoers.d/
+Remove unauthorized files: sudo rm /etc/sudoers.d/<filename>
+Lock Unnecessary System Accounts
+
+List accounts: cat /etc/passwd
+Lock accounts like games, irc, etc: sudo usermod -L <username>
+Set shell to nologin: sudo usermod -s /usr/sbin/nologin <username>
+Authentication & PasswordsChange All User Passwords
+
+For each authorized user: sudo passwd <username>
+Enter strong password (meet complexity requirements)
+Change root password: sudo passwd root
+Enable Automatic Security Updates
+
+Open Software Updater from Menu
+Click Settings → Updates tab
+Set "When there are security updates" to "Download and install automatically"
+Or via terminal: sudo dpkg-reconfigure -plow unattended-upgrades
+Select "Yes"
+Check for Blank Passwords
+
+View shadow file: sudo cat /etc/shadow
+Look for entries with ! or * between first and second colon
+Entries with :: have blank passwords - set password immediately
+Services & ProcessesList and Disable Unauthorized Services
+
+List all services: systemctl list-unit-files --type=service | grep enabled
+Check service status: systemctl status <service-name>
+Stop service: sudo systemctl stop <service-name>
+Disable service: sudo systemctl disable <service-name>
+Common services to check: vsftpd, telnet, apache2, nginx, samba
+Remove Prohibited Software
+
+List installed packages: dpkg --list | less
+Search for specific software: dpkg --list | grep -i <package-name>
+Common prohibited items: wireshark, nmap, john, hydra, netcat, telnet, games
+Remove package: sudo apt-get purge <package-name>
+Check for games: dpkg --list | grep -i game
+Remove games: sudo apt-get purge aisleriot gnome-mahjongg gnome-mines gnome-sudoku
+Check for Backdoors/Listeners
+
+List listening ports: sudo netstat -tulpn | grep LISTEN
+Check for netcat: ps aux | grep nc
+Kill suspicious processes: sudo kill -9 <PID>
+Remove netcat: sudo apt-get purge netcat netcat-traditional
+Review Startup Applications
+
+Menu → Preferences → Startup Applications
+Disable unauthorized startup items
+Check crontabs: sudo crontab -l and crontab -l
+Check all user crontabs: sudo ls /var/spool/cron/crontabs
+Edit if needed: sudo crontab -e
+File System SecurityFind World-Writable Files
+
+Search system: sudo find / -perm -002 -type f -ls 2>/dev/null
+Remove write permission: sudo chmod o-w <filename>
+Locate Media Files (if prohibited)
+
+Find audio files: sudo find /home -name "*.mp3" -o -name "*.wav" 2>/dev/null
+Find video files: sudo find /home -name "*.mp4" -o -name "*.avi" -o -name "*.mov" 2>/dev/null
+Find images: sudo find /home -name "*.jpg" -o -name "*.png" 2>/dev/null
+Delete if prohibited: sudo rm <filepath>
+Check Crontabs for Malicious Tasks
+
+System crontab: sudo cat /etc/crontab
+Cron directories: ls /etc/cron.*
+Check each: sudo cat /etc/cron.d/*, /etc/cron.daily/*, etc.
+Remove malicious entries: sudo rm <filepath> or edit files
+Review Hosts File
+
+Check hosts: sudo cat /etc/hosts
+Edit if needed: sudo nano /etc/hosts
+Remove suspicious entries
+Should only contain localhost entries typically
+Firewall & NetworkEnable UFW Firewall
+
+Check status: sudo ufw status
+Enable firewall: sudo ufw enable
+Set default deny: sudo ufw default deny incoming
+Set default allow: sudo ufw default allow outgoing
+Allow necessary services: sudo ufw allow <port>/<protocol>
+Check rules: sudo ufw status numbered
+Configure SSH Properly
+
+Edit SSH config: sudo nano /etc/ssh/sshd_config
+Set these parameters:
+
+   PermitRootLogin no
+   PasswordAuthentication yes
+   PermitEmptyPasswords no
+   Protocol 2
+   Port 2222 (or leave 22 if required)
+
+Restart SSH: sudo systemctl restart sshd
+If SSH not needed and not required: sudo systemctl disable sshd
+Check Listening Ports
+
+View all listening: sudo netstat -tulpn
+Or use ss: sudo ss -tulpn
+Investigate unknown services
+Close unnecessary ports via firewall or disable service
