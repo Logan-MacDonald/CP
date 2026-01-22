@@ -1,0 +1,271 @@
+User & Access Management
+Remove Unauthorized Local Users
+
+Open Computer Management: Press Windows Key, type "Computer Management", press Enter
+Navigate: System Tools → Local Users and Groups → Users
+Right-click unauthorized user → Delete
+Or via PowerShell: Remove-LocalUser -Name "<username>"
+
+Remove Unauthorized Users from Administrator Group
+
+In Computer Management → Local Users and Groups → Groups
+Double-click "Administrators"
+Compare with README authorized list
+Select unauthorized user → Remove
+Or via PowerShell: Remove-LocalGroupMember -Group "Administrators" -Member "<username>"
+
+Disable Guest Account
+
+In Computer Management → Local Users and Groups → Users
+Right-click "Guest" → Properties
+Check "Account is disabled" → OK
+Or via PowerShell: Disable-LocalUser -Name "Guest"
+
+Configure Password Policy
+
+Press Windows Key + R, type secpol.msc, press Enter
+Navigate: Account Policies → Password Policy
+Double-click each setting and configure:
+
+Password must meet complexity requirements: Enabled
+Minimum password length: 8 characters (or as specified)
+Maximum password age: 90 days
+Minimum password age: 1 day
+Enforce password history: 5 passwords remembered
+Store passwords using reversible encryption: Disabled
+
+
+Click OK for each
+
+Configure Account Lockout Policy
+
+Still in secpol.msc → Account Policies → Account Lockout Policy
+Configure:
+
+Account lockout threshold: 5 invalid attempts
+Account lockout duration: 30 minutes
+Reset account lockout counter after: 30 minutes
+
+
+Click OK
+
+Audit Group Memberships
+
+Computer Management → Local Users and Groups → Groups
+Check these groups: Administrators, Remote Desktop Users, Backup Operators, Power Users
+Remove unauthorized members from sensitive groups
+
+Authentication & Passwords
+Change Administrator and User Passwords
+
+Press Ctrl+Alt+Delete → Change Password
+Or via Computer Management → Users → Right-click user → Set Password
+Or PowerShell (run as admin):
+
+powershell   $Password = Read-Host -AsSecureString "Enter new password"
+   Set-LocalUser -Name "<username>" -Password $Password
+
+Change for ALL authorized users
+
+Enable Audit Policies
+
+Open Local Security Policy (secpol.msc)
+Navigate: Local Policies → Audit Policy
+Enable these (Success and Failure):
+
+Audit account logon events
+Audit account management
+Audit logon events
+Audit policy change
+Audit system events
+
+
+Double-click each → Check both boxes → OK
+
+Services & Features
+Disable Unnecessary Services
+
+Press Windows Key + R, type services.msc, press Enter
+Review each service, identify unauthorized ones
+Common services to check/disable if not needed:
+
+Remote Registry
+Telnet
+FTP Publishing Service
+Simple TCP/IP Services
+World Wide Web Publishing Service (if not needed)
+
+
+Double-click service → Startup type: Disabled → Stop → OK
+
+Remove Prohibited Programs
+
+Open Control Panel → Programs → Programs and Features
+Or Settings → Apps → Installed apps
+Look for: games, remote access tools (VNC, TeamViewer if unauthorized), P2P software
+Right-click → Uninstall
+Or PowerShell: Get-AppxPackage *<name>* | Remove-AppxPackage
+
+Uninstall Unnecessary Windows Features
+
+Open Server Manager
+Click Manage → Remove Roles and Features
+Click Next until Features page
+Uncheck unnecessary features:
+
+Telnet Client
+TFTP Client
+Simple TCP/IP Services
+Any other unauthorized features
+
+
+Click Next → Remove
+
+Check Startup Programs
+
+Press Ctrl+Shift+Esc (Task Manager)
+Click "Startup" tab
+Disable unauthorized startup items: Right-click → Disable
+Also check: Press Windows + R → type shell:startup → Delete unauthorized items
+Check Task Scheduler: taskschd.msc
+
+Review Task Scheduler Library
+Disable/delete suspicious tasks
+
+
+
+Updates & Security
+Run Windows Update
+
+Open Settings: Windows Key + I
+Windows Update → Check for updates
+Install all available updates
+Restart if required
+Or via PowerShell:
+
+powershell   Install-Module PSWindowsUpdate
+   Get-WindowsUpdate
+   Install-WindowsUpdate -AcceptAll -AutoReboot
+Enable Windows Defender/Antivirus
+
+Settings → Privacy & Security → Windows Security
+Click "Virus & threat protection"
+Ensure Real-time protection is ON
+Click "Scan options" → Run Full scan
+Manage settings → Ensure all protections are ON
+
+Enable Windows Firewall
+
+Press Windows Key, type "Windows Defender Firewall", press Enter
+Click "Turn Windows Defender Firewall on or off"
+Turn ON for all three profiles:
+
+Domain networks
+Private networks
+Public networks
+
+
+Click OK
+
+Configure Automatic Updates
+
+Settings → Windows Update
+Click "Advanced options"
+Ensure "Receive updates for other Microsoft products" is ON
+Set Active hours to appropriate time
+Or via Group Policy: gpedit.msc → Computer Configuration → Administrative Templates → Windows Components → Windows Update
+
+Configure Automatic Updates: Enabled, Auto download and schedule install
+
+
+
+File System & Permissions
+Search for Prohibited Media Files
+
+Open File Explorer → This PC
+In search box (top right), search for:
+
+*.mp3 - audio files
+*.mp4 - video files
+*.avi - video files
+*.mov - video files
+*.jpg - images (if prohibited)
+
+
+Or PowerShell:
+
+powershell   Get-ChildItem C:\ -Recurse -Include *.mp3,*.mp4,*.avi,*.mov -ErrorAction SilentlyContinue
+
+Delete if prohibited: Right-click → Delete
+
+Check Scheduled Tasks
+
+Press Windows Key, type "Task Scheduler", press Enter
+Click "Task Scheduler Library"
+Review all tasks for suspicious entries
+Check task actions (look for scripts, unauthorized programs)
+Delete suspicious tasks: Right-click → Delete
+
+Review Share Permissions
+
+Open Computer Management
+System Tools → Shared Folders → Shares
+Review each share
+Remove unnecessary shares: Right-click → Stop Sharing
+For necessary shares: Right-click → Properties → Share Permissions → Set appropriately (remove Everyone if present)
+
+Audit File/Folder Permissions
+
+Navigate to C:\Users in File Explorer
+Right-click → Properties → Security tab
+Ensure only appropriate users have access
+Remove unauthorized users: Edit → Select user → Remove
+Check critical folders: C:\Windows\System32, Program Files
+
+Network Security
+Review Firewall Rules
+
+Press Windows Key, type "Windows Defender Firewall with Advanced Security", press Enter
+Click "Inbound Rules"
+Review each rule
+Disable unauthorized rules: Right-click → Disable Rule
+Delete if clearly malicious: Right-click → Delete
+Repeat for "Outbound Rules"
+
+Secure Remote Desktop
+
+If not required: Disable RDP
+
+Right-click This PC → Properties → Remote settings
+Select "Don't allow remote connections" → OK
+
+
+If required: Secure it
+
+Only allow specific users: Select users → Add → Add authorized users only
+Network Level Authentication should be required (checkbox)
+
+
+Change RDP port (optional):
+
+regedit → HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp
+Find "PortNumber" → Change from 3389 to another port
+
+
+
+Check Listening Ports
+
+Open PowerShell as Administrator
+Run: netstat -ano | findstr LISTENING
+Identify PIDs of unknown services
+Find process: tasklist | findstr <PID>
+Investigate and stop if unauthorized
+
+Review Hosts File
+
+Open Notepad as Administrator
+File → Open → Navigate to: C:\Windows\System32\drivers\etc
+Change file type to "All Files"
+Open "hosts" file
+Remove suspicious entries (should mostly be localhost entries)
+Save and close
