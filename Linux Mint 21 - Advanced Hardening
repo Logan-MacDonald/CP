@@ -290,3 +290,19 @@ ADVANCED Security Checklist
    auth,authpriv.* /var/log/auth.log
    ```
 2. Restart: `sudo systemctl restart rsyslog`
+
+Final Sweep Checklist
+Linux:
+
+ All unauthorized users removed
+ All passwords changed and meet requirements
+ Password aging configured
+ Prohibited software removed
+ Prohibited media files deleted
+ Unauthorized services disabled
+ Firewall enabled with proper rules
+ Updates installed
+ Sudo permissions correct
+ SSH hardened or disabled
+ Crontabs cleaned
+ Forensics questions answered
