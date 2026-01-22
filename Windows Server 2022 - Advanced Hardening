@@ -1,0 +1,514 @@
+Windows Server 2022 - Advanced Hardening
+Advanced User & Account Security
+Advanced User Auditing
+
+Check for duplicate SIDs:
+
+powershell   Get-LocalUser | Select Name,SID
+
+Find accounts with password never expires:
+
+powershell   Get-LocalUser | Where-Object {$_.PasswordNeverExpires -eq $true}
+
+Set password expiration:
+
+powershell   Get-LocalUser | Where-Object {$_.PasswordNeverExpires -eq $true} | Set-LocalUser -PasswordNeverExpires $false
+
+Check for accounts that never logged in:
+
+powershell   Get-LocalUser | Where-Object {$_.LastLogon -eq $null}
+
+Find disabled accounts:
+
+powershell   Get-LocalUser | Where-Object {$_.Enabled -eq $false}
+Advanced Account Policies
+
+Open Group Policy: gpedit.msc
+Navigate: Computer Configuration → Windows Settings → Security Settings → Account Policies
+
+Advanced Password Policy
+
+Account Policies → Password Policy:
+
+Minimum password length: 10-14 characters
+Password must meet complexity: Enabled
+Store passwords using reversible encryption: Disabled
+Minimum password age: 1 day
+Maximum password age: 60-90 days
+Enforce password history: 10-24 passwords
+
+
+
+Advanced Account Lockout Policy
+
+Account Policies → Account Lockout Policy:
+
+Account lockout duration: 30 minutes
+Account lockout threshold: 3-5 attempts
+Reset account lockout counter after: 30 minutes
+
+
+
+Kerberos Policy (if domain)
+
+Account Policies → Kerberos Policy:
+
+Maximum lifetime for service ticket: 600 minutes
+Maximum lifetime for user ticket: 10 hours
+
+
+
+Advanced Local Security Policies
+Advanced Audit Policy Configuration
+
+Open Command Prompt as Administrator
+Set advanced audit policies:
+
+batch   auditpol /set /category:"Account Logon" /success:enable /failure:enable
+   auditpol /set /category:"Account Management" /success:enable /failure:enable
+   auditpol /set /category:"Logon/Logoff" /success:enable /failure:enable
+   auditpol /set /category:"Object Access" /success:enable /failure:enable
+   auditpol /set /category:"Policy Change" /success:enable /failure:enable
+   auditpol /set /category:"Privilege Use" /success:enable /failure:enable
+   auditpol /set /category:"System" /success:enable /failure:enable
+
+Verify: auditpol /get /category:*
+
+Security Options (secpol.msc → Local Policies → Security Options)
+
+Accounts: Administrator account status → Disabled (if not primary admin)
+Accounts: Guest account status → Disabled
+Accounts: Limit local account use of blank passwords → Enabled
+Accounts: Rename administrator account → Set to non-obvious name
+Accounts: Rename guest account → Set to non-obvious name
+Interactive logon: Do not display last user name → Enabled
+Interactive logon: Machine inactivity limit → 900 seconds (15 min)
+Interactive logon: Message text for users attempting to log on → Set warning message
+Microsoft network server: Digitally sign communications (always) → Enabled
+Network access: Do not allow anonymous enumeration of SAM accounts → Enabled
+Network access: Let Everyone permissions apply to anonymous users → Disabled
+Network security: Do not store LAN Manager hash → Enabled
+Network security: LAN Manager authentication level → Send NTLMv2 response only
+Shutdown: Allow system to be shut down without having to log on → Disabled
+System objects: Strengthen default permissions → Enabled
+User Account Control: Run all administrators in Admin Approval Mode → Enabled
+
+User Rights Assignment (secpol.msc → Local Policies → User Rights Assignment)
+
+Access this computer from network → Remove Everyone, add only authorized users
+Allow log on locally → Only authorized users
+Deny access to this computer from the network → Add Guest
+Deny log on as a batch job → Add Guest
+Deny log on as a service → Add Guest
+Deny log on locally → Add Guest
+Deny log on through Remote Desktop Services → Add Guest
+
+Advanced Service Hardening
+Disable Risky Services
+
+Open Services (services.msc)
+Disable these services if not needed:
+
+Remote Registry (Always disable)
+Windows Remote Management (WS-Management) (unless needed)
+Remote Desktop Services (if not needed)
+Server (if file sharing not needed)
+Telnet
+Simple TCP/IP Services
+FTP Publishing Service
+IIS Admin Service (if web server not needed)
+Print Spooler (if printing not needed)
+Windows Media Player Network Sharing Service
+Xbox services (all of them)
+
+
+
+Check Services Running as System/Admin
+
+PowerShell:
+
+powershell   Get-WmiObject Win32_Service | Where-Object {$_.StartName -eq 'LocalSystem'} | Select Name, StartName, State
+Service Permissions
+
+Check service permissions: sc sdshow <servicename>
+Use SubInACL tool if needed for advanced permissions
+
+Advanced Registry Hardening
+Critical Registry Settings
+
+Open Registry Editor: regedit
+
+Disable AutoRun/AutoPlay
+
+Navigate to: HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer
+Create DWORD: NoDriveTypeAutoRun = 0xFF (255)
+Also set at: HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer
+
+Disable Anonymous SID Resolution
+
+Navigate to: HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Lsa
+Set DWORD: RestrictAnonymousSAM = 1
+Set DWORD: RestrictAnonymous = 1
+
+Harden NTLM
+
+Navigate to: HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Lsa
+Set DWORD: LmCompatibilityLevel = 5 (NTLMv2 only)
+Set DWORD: NoLMHash = 1
+
+Disable NetBIOS
+
+Navigate to: HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\NetBT\Parameters
+Set DWORD: NodeType = 2 (P-node, disables broadcasts)
+
+Screen Saver Lock
+
+Navigate to: HKEY_CURRENT_USER\Control Panel\Desktop
+Set String: ScreenSaveActive = 1
+Set String: ScreenSaverIsSecure = 1
+Set String: ScreenSaveTimeOut = 600 (10 minutes)
+
+Advanced Network Hardening
+SMB Hardening
+
+Disable SMBv1 (PowerShell as admin):
+
+powershell   Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol
+
+Require SMB signing:
+
+powershell   Set-SmbServerConfiguration -RequireSecuritySignature $true -Force
+   Set-SmbServerConfiguration -EnableSecuritySignature $true -Force
+
+Disable SMBv1 server:
+
+powershell   Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force
+Advanced Firewall Configuration
+
+Open Windows Defender Firewall with Advanced Security
+Right-click "Windows Defender Firewall..." → Properties
+For each profile (Domain, Private, Public):
+
+Firewall state: On
+Inbound connections: Block
+Outbound connections: Allow
+Protected network connections: All
+
+
+Enable logging:
+
+Log dropped packets: Yes
+Log successful connections: Yes
+Log file location: %SystemRoot%\System32\LogFiles\Firewall\pfirewall.log
+
+
+
+Block Specific Ports (if not needed)
+
+Block NetBIOS: Ports 137, 138, 139
+Block SMB: Port 445
+Block Telnet: Port 23
+Block FTP: Ports 20, 21
+Create inbound rules to block each
+
+Disable LLMNR and NetBIOS
+
+PowerShell:
+
+powershell   # Disable LLMNR
+   New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" -Force
+   Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" -Name "EnableMulticast" -Value 0 -Type DWord
+
+Disable NetBIOS:
+
+Open Network Connections
+Right-click adapter → Properties → Internet Protocol Version 4 → Properties → Advanced
+WINS tab → Disable NetBIOS over TCP/IP
+
+
+
+Advanced File System Security
+Enable File Auditing
+
+Right-click C:\ → Properties → Security → Advanced → Auditing
+Add → Select a principal: Everyone
+Type: All
+Check: Full control
+Apply to: This folder, subfolders and files
+OK
+
+Check for Alternate Data Streams
+
+PowerShell:
+
+powershell   Get-ChildItem -Path C:\ -Recurse | Get-Item -Stream * | Where-Object {$_.Stream -ne ':$DATA'}
+
+Delete suspicious streams:
+
+powershell   Remove-Item -Path "file.txt" -Stream "StreamName"
+Find Large/Suspicious Files
+
+PowerShell:
+
+powershell   # Files over 100MB
+   Get-ChildItem C:\ -Recurse -File -ErrorAction SilentlyContinue | Where-Object {$_.Length -gt 100MB} | Select FullName, Length
+   
+   # Recently modified files (last 24 hours)
+   Get-ChildItem C:\ -Recurse -File -ErrorAction SilentlyContinue | Where-Object {$_.LastWriteTime -gt (Get-Date).AddDays(-1)}
+   
+   # Hidden files
+   Get-ChildItem C:\ -Recurse -Hidden -ErrorAction SilentlyContinue
+Advanced Share Permissions
+
+List all shares:
+
+powershell   Get-SmbShare
+
+Remove administrative shares if not needed:
+
+powershell   Remove-SmbShare -Name "C$" -Force
+   Remove-SmbShare -Name "ADMIN$" -Force
+(Note: These recreate on reboot, may need to disable via registry)
+3. Review share permissions:
+powershell   Get-SmbShareAccess -Name "ShareName"
+Advanced Windows Features
+Disable Unnecessary Windows Features
+
+PowerShell:
+
+powershell   # List all features
+   Get-WindowsFeature | Where-Object {$_.InstallState -eq 'Installed'}
+   
+   # Remove specific features
+   Uninstall-WindowsFeature -Name Telnet-Client
+   Uninstall-WindowsFeature -Name TFTP-Client
+   Uninstall-WindowsFeature -Name PowerShell-V2  # Old PowerShell version
+   Uninstall-WindowsFeature -Name SMB1Protocol
+Windows Defender Advanced Settings
+
+PowerShell (as admin):
+
+powershell   # Enable all protections
+   Set-MpPreference -DisableRealtimeMonitoring $false
+   Set-MpPreference -DisableBehaviorMonitoring $false
+   Set-MpPreference -DisableBlockAtFirstSeen $false
+   Set-MpPreference -DisableIOAVProtection $false
+   Set-MpPreference -DisableScriptScanning $false
+   
+   # Enable cloud protection
+   Set-MpPreference -MAPSReporting Advanced
+   Set-MpPreference -SubmitSamplesConsent SendAllSamples
+   
+   # Enable PUA protection
+   Set-MpPreference -PUAProtection Enabled
+Advanced System Configuration
+Disable Unnecessary Protocols
+
+PowerShell:
+
+powershell   # Disable IPv6 if not needed
+   Disable-NetAdapterBinding -Name "*" -ComponentID ms_tcpip6
+BitLocker Status Check
+
+Check if BitLocker is on: manage-bde -status
+If required and not enabled, enable it (may take time):
+
+   manage-bde -on C:
+Check Windows Update Settings
+
+Open Settings → Windows Update → Advanced Options
+Ensure "Receive updates for other Microsoft products" is ON
+PowerShell check:
+
+powershell   Get-WindowsUpdateLog
+Disable Remote Assistance
+
+System Properties → Remote → Uncheck "Allow Remote Assistance"
+Or via Registry:
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Remote Assistance
+Set fAllowToGetHelp = 0
+
+
+
+Advanced Process & Application Security
+AppLocker Configuration (if available)
+
+Open Local Security Policy → Application Control Policies → AppLocker
+Configure rules to allow only approved applications
+Set default rules for:
+
+Executable Rules
+Windows Installer Rules
+Script Rules
+
+
+
+Software Restriction Policies
+
+secpol.msc → Software Restriction Policies
+Create new policies if not exists
+Set default security level to "Disallowed"
+Create path rules for authorized software
+
+Check for Malicious Tasks in Depth
+
+PowerShell:
+
+powershell   Get-ScheduledTask | Where-Object {$_.State -ne "Disabled"} | Select TaskName, TaskPath, State
+
+Check task actions:
+
+powershell   Get-ScheduledTask | ForEach-Object {
+       $_ | Select TaskName, @{Name="Actions";Expression={$_.Actions.Execute}}
+   }
+Process Monitoring
+
+Check for suspicious processes:
+
+powershell   Get-Process | Sort-Object -Property CPU -Descending | Select -First 20
+
+Check process command lines:
+
+powershell   Get-WmiObject Win32_Process | Select Name, ProcessId, CommandLine
+Advanced Event Log Analysis
+Security Event IDs to Check
+
+Open Event Viewer: eventvwr.msc
+Windows Logs → Security
+Filter for these Event IDs:
+
+4624: Successful logon
+4625: Failed logon
+4720: User account created
+4722: User account enabled
+4724: Password reset attempt
+4728: User added to security-enabled global group
+4732: User added to security-enabled local group
+4735: Security-enabled local group changed
+4738: User account changed
+4740: User account locked out
+4756: Member added to security-enabled universal group
+
+
+
+PowerShell Event Log Query
+powershell# Failed logons in last 24 hours
+Get-EventLog -LogName Security -After (Get-Date).AddDays(-1) -InstanceId 4625
+
+# Account creations
+Get-EventLog -LogName Security -InstanceId 4720
+
+# Group membership changes
+Get-EventLog -LogName Security -InstanceId 4732,4728
+Increase Security Log Size
+
+Event Viewer → Windows Logs → Security → Right-click → Properties
+Maximum log size: 1024000 KB (1 GB)
+When maximum event log size is reached: Archive the log
+Or PowerShell:
+
+powershell   Limit-EventLog -LogName Security -MaximumSize 1GB
+IIS Hardening (if Web Server is Required)
+IIS Security Headers
+
+Open IIS Manager
+Select server → HTTP Response Headers
+Add headers:
+
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+X-XSS-Protection: 1; mode=block
+
+
+
+Remove IIS Headers
+
+Remove Server header (shows IIS version)
+Edit web.config:
+
+xml   <system.webServer>
+     <security>
+       <requestFiltering removeServerHeader="true" />
+     </security>
+     <httpProtocol>
+       <customHeaders>
+         <remove name="X-Powered-By" />
+       </customHeaders>
+     </httpProtocol>
+   </system.webServer>
+Disable WebDAV (if not needed)
+
+IIS Manager → WebDAV Authoring Rules → Disable WebDAV
+
+SQL Server Hardening (if Database Server is Required)
+SQL Server Security
+
+Disable sa account if not needed:
+
+sql   ALTER LOGIN sa DISABLE;
+
+Use Windows Authentication only (if possible)
+Remove guest user from databases
+Enable SQL Server Audit
+Change default SQL Server port from 1433
+
+
+Additional High-Value Checks
+Both Systems: Forensics Questions
+Read Forensics Questions Carefully
+
+They're usually worth significant points
+Look for specific file names, user names, or configurations mentioned
+Check Desktop, Documents, Downloads folders
+Look in README for hints about what to search for
+
+Both Systems: Time & Date
+Verify System Time
+
+Incorrect time can break authentication
+Check timezone is correct
+Enable automatic time synchronization
+
+Both Systems: Browser Security
+Clear Browser Data
+
+Clear all cookies and cached data
+Remove browsing history
+Check for saved passwords (remove or secure)
+Verify homepage isn't malicious
+
+Critical Scoring Tips
+
+READ THE README MULTIPLE TIMES - It contains all scoring criteria
+Document changes - Keep a log of what you've done
+Don't break required services - Check README for what must stay running
+Forensics questions first - Often quick points
+User management - Usually high-point items
+Updates - Run updates early (they take time)
+Check scoring report - If available, see what you're missing
+Prohibited files - Search entire system, not just user directories
+Services - Both enabling required ones AND disabling prohibited ones
+Password policies - Often multiple settings needed for full points
+
+Final Sweep Checklist
+
+Windows:
+
+ All unauthorized users removed
+ All passwords changed and meet requirements
+ Password policy configured (complexity, length, age, lockout)
+ Prohibited software uninstalled
+ Prohibited media files deleted
+ Unauthorized services disabled
+ Windows Firewall enabled all profiles
+ Windows Updates installed
+ Windows Defender enabled and scanning
+ Group memberships correct
+ Audit policies enabled
+ Security options configured
+ Remote Desktop secured or disabled
+ Scheduled tasks cleaned
+ Forensics questions answered
+
+Good luck! Remember: READ THE README THOROUGHLY! 🏆
