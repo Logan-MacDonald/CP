@@ -1,0 +1,292 @@
+ADVANCED Security Checklist
+
+## Linux Mint 21 - Advanced Hardening
+
+### Advanced User & Account Security
+
+**Check for Hidden/Backdoor Accounts**
+1. Find accounts with unusual UID ranges: `awk -F: '$3 >= 1000 && $3 < 65534 {print $1,$3}' /etc/passwd`
+2. Check for accounts with duplicate UIDs: `awk -F: '{print $3}' /etc/passwd | sort -n | uniq -d`
+3. Find users with no password: `sudo awk -F: '($2 == "" ) {print $1}' /etc/shadow`
+4. Check for users with bash shell that shouldn't: `grep "/bin/bash" /etc/passwd`
+5. Verify all users have home directories: 
+   ```bash
+   cat /etc/passwd | while IFS=: read user x uid gid x home x; do
+     [ -d "$home" ] || echo "$user has no home directory"
+   done
+   ```
+
+**Advanced Password Security**
+1. Edit `/etc/login.defs` and add/modify:
+   ```
+   LOGIN_RETRIES 3
+   LOGIN_TIMEOUT 60
+   FAILLOG_ENAB yes
+   PASS_MIN_LEN 10
+   PASS_MAX_LEN 128
+   ```
+2. Lock user accounts after failed attempts: `sudo nano /etc/pam.d/common-auth`
+   Add before any other auth lines:
+   ```
+   auth required pam_tally2.so deny=5 unlock_time=1800 onerr=fail
+   ```
+3. Enforce strong passwords for root: `sudo passwd -l root` (if root login not needed)
+4. Set password expiration on all accounts:
+   ```bash
+   for user in $(awk -F: '$3 >= 1000 && $3 < 65534 {print $1}' /etc/passwd); do
+     sudo chage -M 90 -m 7 -W 14 "$user"
+   done
+   ```
+
+**Check SSH Keys and Authorized Keys**
+1. Check all users for SSH keys: `sudo find /home -name "authorized_keys" -o -name "id_rsa*" -o -name "id_dsa*"`
+2. Review authorized_keys files: `sudo cat /home/*/.ssh/authorized_keys`
+3. Remove unauthorized keys
+4. Set proper permissions: `sudo find /home -name ".ssh" -exec chmod 700 {} \;`
+5. Check for SSH keys: `sudo find /home -name "id_*" -type f`
+
+### Advanced Service Hardening
+
+**Comprehensive Service Audit**
+1. List all listening services with users: `sudo netstat -tulpn`
+2. Check services running as root: `ps aux | grep ^root`
+3. Find services with network connections: `sudo lsof -i -P -n`
+4. Disable IPv6 if not needed:
+   ```bash
+   sudo nano /etc/sysctl.conf
+   # Add:
+   net.ipv6.conf.all.disable_ipv6 = 1
+   net.ipv6.conf.default.disable_ipv6 = 1
+   net.ipv6.conf.lo.disable_ipv6 = 1
+   ```
+   Apply: `sudo sysctl -p`
+
+**Apache/Nginx Hardening (if web server required)**
+1. Apache - edit `/etc/apache2/apache2.conf`:
+   ```
+   ServerTokens Prod
+   ServerSignature Off
+   TraceEnable Off
+   ```
+2. Disable directory listing: Remove `Indexes` from Options
+3. Restart: `sudo systemctl restart apache2`
+4. Nginx - edit `/etc/nginx/nginx.conf`:
+   ```
+   server_tokens off;
+   ```
+
+**MySQL/MariaDB Hardening (if database required)**
+1. Run security script: `sudo mysql_secure_installation`
+2. Remove anonymous users
+3. Disable remote root login
+4. Remove test database
+5. Check for empty passwords:
+   ```sql
+   SELECT User, Host FROM mysql.user WHERE Password='';
+   ```
+
+**Samba Hardening (if file sharing required)**
+1. Edit `/etc/samba/smb.conf`:
+   ```
+   [global]
+   min protocol = SMB2
+   client min protocol = SMB2
+   restrict anonymous = 2
+   ```
+2. Remove guest access
+3. Restart: `sudo systemctl restart smbd`
+
+### Advanced File System Security
+
+**Comprehensive File Permission Checks**
+1. Find SUID files (potential privilege escalation):
+   ```bash
+   sudo find / -perm -4000 -type f -ls 2>/dev/null > /tmp/suid_files.txt
+   ```
+2. Find SGID files:
+   ```bash
+   sudo find / -perm -2000 -type f -ls 2>/dev/null > /tmp/sgid_files.txt
+   ```
+3. Find files with no owner:
+   ```bash
+   sudo find / -nouser -o -nogroup 2>/dev/null
+   ```
+4. Find world-writable directories:
+   ```bash
+   sudo find / -perm -002 -type d -ls 2>/dev/null
+   ```
+5. Check /tmp permissions: `ls -ld /tmp` (should be drwxrwxrwt)
+6. Set sticky bit on /tmp if missing: `sudo chmod +t /tmp`
+
+**Critical File Permissions**
+1. Check /etc/passwd permissions: `ls -l /etc/passwd` (should be 644)
+2. Check /etc/shadow: `ls -l /etc/shadow` (should be 640 or 600)
+3. Check /etc/group: `ls -l /etc/group` (should be 644)
+4. Check /etc/gshadow: `ls -l /etc/gshadow` (should be 640)
+5. Fix if needed:
+   ```bash
+   sudo chmod 644 /etc/passwd
+   sudo chmod 640 /etc/shadow
+   sudo chmod 644 /etc/group
+   sudo chmod 640 /etc/gshadow
+   ```
+
+**Find Suspicious Files**
+1. Find recent files (last 24h): `sudo find / -mtime 0 -ls 2>/dev/null`
+2. Find files modified in last hour: `sudo find / -mmin -60 -type f 2>/dev/null`
+3. Find hidden files in /tmp: `sudo find /tmp -name ".*" -type f`
+4. Find large files (might be media): `sudo find /home -size +10M -type f`
+5. Search for script files: `sudo find /home -name "*.sh" -o -name "*.py" -o -name "*.pl"`
+
+**Rootkit and Malware Checks**
+1. Install chkrootkit: `sudo apt-get install chkrootkit`
+2. Run scan: `sudo chkrootkit`
+3. Install rkhunter: `sudo apt-get install rkhunter`
+4. Update database: `sudo rkhunter --update`
+5. Run scan: `sudo rkhunter --check --skip-keypress`
+
+### Advanced Network Security
+
+**Kernel Parameter Hardening (sysctl)**
+1. Edit `/etc/sysctl.conf` and add:
+   ```
+   # IP Forwarding (disable if not router)
+   net.ipv4.ip_forward = 0
+   
+   # Syn flood protection
+   net.ipv4.tcp_syncookies = 1
+   net.ipv4.tcp_max_syn_backlog = 2048
+   net.ipv4.tcp_synack_retries = 2
+   net.ipv4.tcp_syn_retries = 5
+   
+   # IP spoofing protection
+   net.ipv4.conf.all.rp_filter = 1
+   net.ipv4.conf.default.rp_filter = 1
+   
+   # Ignore ICMP redirects
+   net.ipv4.conf.all.accept_redirects = 0
+   net.ipv4.conf.default.accept_redirects = 0
+   net.ipv4.conf.all.secure_redirects = 0
+   net.ipv4.conf.default.secure_redirects = 0
+   
+   # Ignore ICMP ping requests
+   net.ipv4.icmp_echo_ignore_all = 0
+   net.ipv4.icmp_echo_ignore_broadcasts = 1
+   
+   # Ignore send redirects
+   net.ipv4.conf.all.send_redirects = 0
+   net.ipv4.conf.default.send_redirects = 0
+   
+   # Disable source packet routing
+   net.ipv4.conf.all.accept_source_route = 0
+   net.ipv4.conf.default.accept_source_route = 0
+   
+   # Log Martians
+   net.ipv4.conf.all.log_martians = 1
+   ```
+2. Apply: `sudo sysctl -p`
+
+**Advanced Firewall Rules**
+1. View current rules: `sudo iptables -L -n -v`
+2. Set up stricter UFW rules:
+   ```bash
+   sudo ufw default deny incoming
+   sudo ufw default allow outgoing
+   sudo ufw logging on
+   sudo ufw limit ssh  # Rate limit SSH
+   ```
+3. Block ping if not needed: `sudo ufw deny proto icmp`
+4. Check UFW logs: `sudo tail -f /var/log/ufw.log`
+
+**Check for Network Sniffers**
+1. Check for promiscuous mode: `ip link | grep PROMISC`
+2. List all network interfaces: `ifconfig -a`
+3. Check for packet capture: `sudo lsof | grep pcap`
+
+### Advanced System Configuration
+
+**Disable Core Dumps**
+1. Edit `/etc/security/limits.conf`:
+   ```
+   * hard core 0
+   ```
+2. Edit `/etc/sysctl.conf`:
+   ```
+   fs.suid_dumpable = 0
+   ```
+3. Apply: `sudo sysctl -p`
+
+**GRUB Bootloader Security**
+1. Set GRUB password: `sudo grub-mkpasswd-pbkdf2`
+2. Copy the hash
+3. Edit `/etc/grub.d/40_custom`:
+   ```
+   set superusers="root"
+   password_pbkdf2 root <paste_hash_here>
+   ```
+4. Update GRUB: `sudo update-grub`
+
+**Audit Logging (auditd)**
+1. Install: `sudo apt-get install auditd`
+2. Start service: `sudo systemctl start auditd`
+3. Enable: `sudo systemctl enable auditd`
+4. Check rules: `sudo auditctl -l`
+5. View logs: `sudo ausearch -m USER_LOGIN`
+
+**System File Integrity**
+1. Install AIDE: `sudo apt-get install aide`
+2. Initialize database: `sudo aideinit`
+3. Move database: `sudo mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db`
+4. Check integrity: `sudo aide --check`
+
+### Advanced Process & Runtime Checks
+
+**Check for Suspicious Processes**
+1. List all processes: `ps auxf`
+2. Check for hidden processes: `ps aux | grep "\["`
+3. Check process memory usage: `ps aux --sort=-%mem | head`
+4. Find processes listening on ports: `sudo lsof -i -P`
+5. Check for processes connecting out: `sudo netstat -tanpu`
+
+**Check Loaded Kernel Modules**
+1. List modules: `lsmod`
+2. Check for suspicious modules: `lsmod | grep -E "rootkit|pcap"`
+3. View module info: `modinfo <module_name>`
+4. Blacklist suspicious modules in `/etc/modprobe.d/blacklist.conf`
+
+### Browser Security (Firefox/Chrome)
+
+**Firefox Hardening**
+1. Open Firefox
+2. Check Settings → Privacy & Security:
+   - Enable "Strict" tracking protection
+   - Enable "HTTPS-Only Mode"
+   - Clear all cookies and site data
+3. Check Extensions (Ctrl+Shift+A):
+   - Remove unauthorized extensions
+4. Check about:config:
+   - `javascript.enabled` should be true (unless specified)
+   - Check for suspicious proxy settings
+
+**Check for Malicious Browser Extensions**
+1. Firefox extensions: `ls ~/.mozilla/firefox/*.default*/extensions/`
+2. Chrome extensions: `ls ~/.config/google-chrome/Default/Extensions/`
+
+### Advanced Log Analysis
+
+**Review Critical Logs**
+1. Authentication failures: `sudo grep "Failed password" /var/log/auth.log`
+2. Sudo commands: `sudo grep "sudo" /var/log/auth.log`
+3. User additions: `sudo grep "useradd\|groupadd" /var/log/auth.log`
+4. Service failures: `sudo journalctl -p err -b`
+5. System boots: `last reboot`
+6. Failed login attempts: `sudo lastb`
+7. Successful logins: `last`
+
+**Configure Rsyslog**
+1. Edit `/etc/rsyslog.conf`:
+   ```
+   *.* /var/log/syslog
+   auth,authpriv.* /var/log/auth.log
+   ```
+2. Restart: `sudo systemctl restart rsyslog`
